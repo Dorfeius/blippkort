@@ -125,6 +125,13 @@
   /* stor skärm (t.ex. Chromebook): förstora allt så att det syns på håll */
   @media (min-width: 900px) { header, main { zoom:1.35; } }
   @media (min-width: 1400px) { header, main { zoom:1.6; } }
+  /* skärmläge på bred skärm: kortet till vänster, valen till höger, allt synligt utan att rulla */
+  @media (min-width: 900px) {
+    body.wide header, body.wide main { max-width:1000px; }
+    .split { display:grid; grid-template-columns:1fr 1fr; gap:18px; align-items:start; }
+  }
+  .armed .what { white-space:normal; }
+  .choices { display:grid; gap:12px; } .choices button { font-size:20px; padding:16px 18px; text-align:left; }
   #fsBtn.on { background:var(--accent); color:#fff; box-shadow:0 4px 0 var(--accent-d); }
   @media (prefers-reduced-motion: reduce) { *:not(.count i) { animation:none !important; transition:none !important; } }
 </style>
@@ -136,6 +143,7 @@
     <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path id="fsIcon" d="M3 7V3h4M13 3h4v4M17 13v4h-4M7 17H3v-4"/></svg></button>
   <button id="cloud" hidden onclick="if(secret)show({name:'sync'})" style="padding:8px 12px"></button>
   <button id="nfcBtn" class="primary">Starta NFC</button>
+  <button id="lockBtn" hidden onclick="unlock()" aria-label="Lås upp" title="Lås upp" style="padding:8px 12px">🔒</button>
   <button id="adminBtn">Admin</button>
 </header>
 <main id="app"></main>
@@ -172,6 +180,12 @@ for (const list of Object.values(bonus)) for (const g of list) { g.id = g.id || 
 let done = load("bk_done", []);           // id:n på väntande ändringar som redan förts över eller tagits bort
 let log = load("bk_log", []);             // händelser: [{ id, ts, n, t, by }]
 let cfgTs = load("bk_cfgts", 0);
+let role = load("bk_role", null);         // { screen: true, code }: enheten är en skärm som visar saldot
+let station = load("bk_station", false);  // den här mobilen är läsare åt skärmen
+let scan = load("bk_scan", null);         // senaste blippet från läsaren: det skärmen visar
+let req = load("bk_req", null);           // elevens val på skärmen som väntar på ett bekräftande blipp
+const ACTS = { "p-1": ["p", -1], "e-1": ["e", -1], up: ["up", 0] };
+const ACT_TEXT = { "p-1": "−1 ✏️ (hämta en penna)", "e-1": "−1 🧽 (hämta ett sudd)", up: "⬆️ ny penna" };
 let gh = load("bk_gh", null);             // { repo, token, who }: koppling till registret på GitHub
 let backup = load("bk_cards", {});        // kortnummer -> senast kända läge
 let adding = false;                       // "lägg till nya kort": skriver bara på tomma, okända kort
@@ -232,8 +246,14 @@ async function writeCard(uid, st) {
 async function onTap(serial, message) {
   if (busy) return;
   busy = true; if (adding) armAdding();
-  try { await handleTap(normUid(serial), parseCard(message)); }
-  catch (e) { buzz(false); show({ name: "fail" }); }
+  try {
+    if (station) await stationTap(normUid(serial), parseCard(message));
+    else await handleTap(normUid(serial), parseCard(message));
+  } catch (e) {
+    buzz(false);
+    if (station) { disarm(); publishScan({ status: "retry" }); show({ name: "station" }); }
+    else show({ name: "fail" });
+  }
   finally { busy = false; }
 }
 
@@ -249,10 +269,41 @@ function arm(job) {
 }
 function disarm() { pending = null; clearTimeout(pendTimer); }
 const signed = (d) => (d > 0 ? "+" : "−") + Math.abs(d);
-const quickLabel = (q) => `${signed(q[1])} ${ICON[q[0]]}`;
+const quickLabel = (q) => (q[0] === "up" ? "⬆️ ny penna" : `${signed(q[1])} ${ICON[q[0]]}`);
 function applyQuick(st, q) {              // true om ändringen gick att göra
-  if (!q || st[q[0]] + q[1] < 0) return false;
+  if (!q) return false;
+  if (q[0] === "up") {
+    const cost = nextCost(st.l);
+    if (!cost || st.s < cost) return false;
+    st.s -= cost; st.l += 1; return true;
+  }
+  if (st[q[0]] + q[1] < 0) return false;
   st[q[0]] += q[1]; return true;
+}
+// ----- läsarläge: mobilen läser, skärmen visar. Ett kort ändras bara om eleven valt något på skärmen
+// och sedan blippar SAMMA kort igen inom en kort stund.
+let reqSeen = { id: "", t: 0 };
+function activeReq() {
+  if (!req || req.state !== "wait") return null;
+  if (reqSeen.id !== req.id) reqSeen = { id: req.id, t: Date.now() };     // räkna tiden från att mobilen såg valet
+  return Date.now() - reqSeen.t < 45000 ? req : null;
+}
+const later = (old) => Math.max(Date.now(), ((old && old.at) || 0) + 1);  // klockor på olika enheter går inte exakt lika
+function saveQuiet(k, v) { quietSave = true; save(k, v); quietSave = false; }
+function setReq(r) { req = { ...r, at: later(req) }; saveQuiet("bk_req", req); }
+function publishScan(s) { scan = { id: rid(), at: later(scan), ...s }; saveQuiet("bk_scan", scan); pushNow(); }
+async function stationTap(uid, card) {
+  const r = activeReq(), mine = !!r && r.uid === uid;
+  if (r && !mine) setReq({ ...r, state: "cancel" });                      // ett annat kort blippades: valet gäller inte längre
+  clearTimeout(pendTimer); pending = mine ? { quick: ACTS[r.act] } : null;
+  await handleTap(uid, card);
+  const v = view, okCard = v.name === "edit", st = okCard ? v.orig : null;
+  const did = mine && okCard && !!v.again;
+  if (mine) setReq({ ...r, state: did ? "done" : "fail" });
+  publishScan({ uid, status: okCard ? "ok" : v.name === "bad" ? "bad" : "blank", n: st ? st.n : 0,
+    st: st && { n: st.n, s: st.s, e: st.e, p: st.p, l: st.l, g: nextCost(st.l) },
+    note: v.note || "", did: did ? r.act : "", reqId: mine ? r.id : "" });
+  show({ name: "station", last: st ? `Kort nr ${st.n}${did ? ": " + ACT_TEXT[r.act] : " avläst"}` : "Kortet gick inte att visa" });
 }
 const opened = (uid, st, extra = {}) => show({ name: "edit", uid, st: { ...st }, orig: st, ...extra });
 
@@ -282,7 +333,7 @@ async function handleTap(uid, card) {
       const st = await writeCard(uid, base);
       disarm(); buzz(true);
       return opened(uid, st, { saved: true, note: "Kortet hade tappat sin data (avbruten skrivning) och är återställt från kopian."
-        + (did ? "" : " Gör om din senaste ändring.") });
+        + (did ? "" : " Gör om din senaste ändring."), again: did ? quick : null });
     }
     disarm();
     if (!adding) return show({ name: "blank", uid });
@@ -354,7 +405,9 @@ function show(v) {
   if (adding && !["wait", "edit"].includes(v.name)) stopAdding(true);
   view = v; clearTimeout(clearTimer);
   $("#adminBtn").textContent = secret ? "Meny" : "Admin";
-  app.innerHTML = ({ wait: vWait, card: vCard, blank: vBlank, bad: vBad, edit: vEdit, fail: vFail, armed: vArmed,
+  document.body.classList.toggle("wide", !!role);
+  $("#adminBtn").hidden = !!(station || role); $("#lockBtn").hidden = !(station || role);
+  app.innerHTML = ({ role: vRole, screenSetup: vScreenSetup, screen: vScreen, station: vStation, wait: vWait, card: vCard, blank: vBlank, bad: vBad, edit: vEdit, fail: vFail, armed: vArmed,
                      menu: vMenu, list: vList, levels: vLevels, bonus: vBonus, sync: vSync, log: vLog }[v.name])(v);
   // ett avläst kort ligger inte kvar på skärmen till nästa person
   if (["card", "blank", "bad"].includes(v.name) || (v.name === "edit" && !pending))
@@ -531,6 +584,7 @@ function vMenu() {
   return `<div class="panel"><h3>Admin</h3><div class="row">
     <button class="primary" onclick="show({name:'bonus'})">🎁 Bonus och ändringar</button>
     ${"NDEFReader" in window ? `<button onclick="startAdding()">➕ Lägg till nya kort</button>` : ""}
+    ${"NDEFReader" in window ? `<button onclick="startStation()">📺 Läsare för skärm</button>` : ""}
     <button onclick="show({name:'list'})">Alla kort</button>
     <button onclick="show({name:'log'})">Händelser</button>
     <button onclick="show({name:'levels'})">Nivåer och regler</button>
@@ -592,7 +646,8 @@ const GH_FILE = "blippkort-data.json";
 let syncing = false, syncAgain = false, syncTimer = null, syncInfo = gh ? "Inte synkat ännu" : "";
 const b64e = (s) => { const u = new TextEncoder().encode(s); let o = ""; for (let i = 0; i < u.length; i += 8192) o += String.fromCharCode(...u.subarray(i, i + 8192)); return btoa(o); };
 const b64d = (s) => new TextDecoder().decode(Uint8Array.from(atob(s.replace(/\s/g, "")), (c) => c.charCodeAt(0)));
-const snapshot = () => ({ v: 1, cards: backup, queue: bonus, done, log, levels, cfg, cfgTs });
+const snapshot = () => ({ v: 1, cards: backup, queue: bonus, done, log, levels, cfg, cfgTs, scan, req });
+function pushNow() { clearTimeout(syncTimer); sync(); }
 function setCloud(state, info) {
   syncInfo = info; const el = $("#cloud"); if (!el) return;
   el.hidden = !gh; el.textContent = { ok: "☁️✓", busy: "☁️…", err: "☁️⚠️" }[state] || "☁️"; el.title = info;
@@ -612,7 +667,9 @@ function mergeData(r) {                    // slå ihop registret med det som fi
   const seen = new Set();
   log = [...(r.log || []), ...log].filter((e) => !seen.has(e.id) && seen.add(e.id)).sort((a, b) => a.ts - b.ts).slice(-300);
   if ((r.cfgTs || 0) > cfgTs && Array.isArray(r.levels)) { levels = r.levels; cfg = { ...cfg, ...r.cfg }; cfgTs = r.cfgTs; }
-  quietSave = true;
+  if (r.scan && (!scan || r.scan.at > scan.at)) scan = r.scan;
+  if (r.req && (!req || r.req.at > req.at)) req = r.req;
+  quietSave = true; save("bk_scan", scan); save("bk_req", req);
   save("bk_cards", backup); save("bk_bonus", bonus); save("bk_done", done); save("bk_log", log);
   save("bk_levels", levels); save("bk_cfg", cfg); save("bk_cfgts", cfgTs);
   quietSave = false;
@@ -621,7 +678,7 @@ let known = null;                          // senast hämtade version: { etag, s
 const ghCall = (method, body, etag) => fetch(`https://api.github.com/repos/${gh.repo}/contents/${GH_FILE}`, { method, body, cache: "no-store",
   headers: { Authorization: "Bearer " + gh.token, Accept: "application/vnd.github+json", ...(etag ? { "If-None-Match": etag } : {}) } });
 async function sync() {
-  if (!gh || !secret) return;
+  if (!gh || !(secret || role)) return;
   if (syncing) { syncAgain = true; return; }
   syncing = true;
   const before = JSON.stringify(snapshot());
@@ -650,19 +707,22 @@ async function sync() {
     }
     setCloud("ok", "Synkat " + new Date().toLocaleTimeString("sv-SE", { timeStyle: "short" }));
     if (JSON.stringify(snapshot()) !== before && ["list", "log"].includes(view.name)) show(view);
+    if (role) screenUpdate();
+    if (station && view.name === "station" && !busy) show(view);
   } catch (e) {
     setCloud("err", e instanceof TypeError ? "Inget nät just nu. Synkar när det är tillbaka." : e.message);
   } finally {
     syncing = false;
-    if (syncAgain) { syncAgain = false; queueSync(); }
+    if (syncAgain) { syncAgain = false; setTimeout(sync, 50); }
   }
 }
 function queueSync() { if (!gh) return; clearTimeout(syncTimer); syncTimer = setTimeout(sync, 1200); }
-// Under skoldagen (08:20–15:15) kollar sidan registret var 5:e sekund, annars var 30:e.
-const schoolHours = () => { const d = new Date(), m = d.getHours() * 60 + d.getMinutes(); return m >= 8 * 60 + 20 && m <= 15 * 60 + 15; };
+// Vardagar 08:20–15:15 kollar sidan registret var 5:e sekund, annars var 30:e. Skärm och läsare kollar varannan sekund.
+const schoolHours = () => { const d = new Date(), m = d.getHours() * 60 + d.getMinutes();
+  return d.getDay() >= 1 && d.getDay() <= 5 && m >= 8 * 60 + 20 && m <= 15 * 60 + 15; };
 (function tick() {
   if (document.visibilityState === "visible") sync();
-  setTimeout(tick, schoolHours() ? 5000 : 30000);
+  setTimeout(tick, role || station ? 2000 : schoolHours() ? 5000 : 30000);
 })();
 addEventListener("online", sync);
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") sync(); });
@@ -737,20 +797,125 @@ async function importBackup(input) {
 }
 function logout() {
   if (!confirm("Ta bort nyckeln, kopian och kopplingen till registret från den här enheten? Korten och registret på GitHub påverkas inte.")) return;
-  secret = null; backup = {}; bonus = {}; done = []; log = []; gh = null; adding = false; disarm(); setCloud("", "");
-  try { for (const k of ["bk_key", "bk_cards", "bk_bonus", "bk_done", "bk_log", "bk_gh"]) localStorage.removeItem(k); } catch {}
+  secret = null; backup = {}; bonus = {}; done = []; log = []; gh = null; adding = false; station = false; disarm(); setCloud("", "");
+  try { for (const k of ["bk_key", "bk_cards", "bk_bonus", "bk_done", "bk_log", "bk_gh", "bk_station", "bk_scan", "bk_req"]) localStorage.removeItem(k); } catch {}
   show({ name: "wait" });
 }
 
-$("#adminBtn").onclick = () => {
-  if (secret) return show({ name: "menu" });
+$("#adminBtn").onclick = () => show({ name: secret ? "menu" : "role" });
+function adminLogin() {
   const given = prompt("Hemlig nyckel för admin (minst 8 tecken).\nFörsta gången: hitta på en och skriv upp den.");
   if (!given) return;
   if (given.trim().length < 8) return toast("Nyckeln måste vara minst 8 tecken");
   secret = given.trim(); save("bk_key", secret);
-  if (!("NDEFReader" in window)) $("#nfcBtn").hidden = true;
   show({ name: "wait" });
-};
+}
+
+// ---------- skärm (t.ex. Chromebook) och läsare (mobilen) ----------
+function vRole() {
+  return `<div class="panel"><h3>Vad ska den här enheten göra?</h3><div class="choices">
+    <button class="primary" onclick="adminLogin()">👩‍🏫 Jag är lärare (admin)</button>
+    <button onclick="show({name:'screenSetup'})">📺 Den här enheten ska vara skärm</button></div>
+    <p class="muted" style="margin-bottom:0">Skärmen visar saldot när eleverna blippar mot lärarens mobil i läsarläge.</p></div>
+    <button onclick="show({name:'wait'})">Tillbaka</button>`;
+}
+function vScreenSetup() {
+  return `<div class="panel"><h3>📺 Gör enheten till skärm</h3>
+    <p class="muted">Skärmen behöver registret på GitHub. Den får aldrig adminnyckeln och kan inte själv ändra kort.</p>
+    <form onsubmit="event.preventDefault();saveScreen(this)">
+      <p>Privat förråd<br><input name="repo" value="Dorfeius/blippkort-data" required style="width:100%" autocapitalize="off"></p>
+      <p>Åtkomstnyckel från GitHub<br><input name="token" type="password" placeholder="github_pat_…" required style="width:100%" autocomplete="off"></p>
+      <p>Kod för att lämna skärmläget (minst 4 tecken)<br><input name="code" type="password" minlength="4" required style="width:100%" autocomplete="off"></p>
+      <button class="primary">Starta skärmläge</button></form></div>
+    <button onclick="show({name:'wait'})">Avbryt</button>`;
+}
+function saveScreen(f) {
+  const repo = f.repo.value.trim().replace(/^https:\/\/github\.com\//, "").replace(/\/$/, "");
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return toast("Skriv förrådet som konto/namn");
+  gh = { repo, token: f.token.value.trim(), who: "Skärm" }; known = null; save("bk_gh", gh);
+  role = { screen: true, code: f.code.value.trim() }; save("bk_role", role);
+  seenScan = null; scr = { mode: "idle" }; show({ name: "screen" }); sync();
+}
+function startStation() {
+  if (!gh) return toast("Koppla först mobilen till registret (Meny → Register på GitHub)");
+  station = true; save("bk_station", true); show({ name: "station" });
+}
+function unlock() {
+  if (station) {
+    const k = prompt("Adminnyckeln för att lämna läsarläget:");
+    if (k === null) return;
+    if (k.trim() !== secret) return toast("Fel nyckel");
+    station = false; save("bk_station", false); show({ name: "wait" });
+  } else if (role) {
+    const c = prompt("Koden för att lämna skärmläget:");
+    if (c === null) return;
+    if (c.trim() !== role.code) return toast("Fel kod");
+    role = null; gh = null; known = null; clearTimeout(scrTimer);
+    try { localStorage.removeItem("bk_role"); localStorage.removeItem("bk_gh"); } catch {}
+    setCloud("", ""); show({ name: "wait" });
+  }
+}
+function vStation({ last }) {
+  const r = activeReq();
+  return `<div class="armed"><div class="confirm-icon big-icon"><i></i><i></i><span>📡</span></div>
+    <h2>${reader ? "Blippa kortet här" : "Tryck Starta NFC"}</h2>
+    <p>${reader ? "Saldot visas på skärmen." : "Läsarläget är på, men NFC måste startas efter att sidan laddats."}</p>
+    ${r ? `<p><span class="what">Väntar på kort nr ${r.n}: ${ACT_TEXT[r.act]}</span></p><p><small>Blippa samma kort igen för att bekräfta.</small></p>`
+        : last ? `<p><small>Senast: ${esc(last)}</small></p>` : ""}
+    <p><small>${esc(syncInfo || "")}</small></p></div>`;
+}
+
+let scr = { mode: "idle" }, seenScan = null, scrTimer = null;
+function setScr(s, ms) {
+  scr = s; clearTimeout(scrTimer);
+  if (ms) scrTimer = setTimeout(() => setScr({ mode: "idle" }), ms);
+  if (view.name === "screen") show(view);
+}
+function screenUpdate() {
+  if (seenScan === null) { seenScan = scan ? scan.id : ""; return; }      // visa inte ett gammalt blipp när skärmen startar
+  if (!scan || scan.id === seenScan) return;
+  seenScan = scan.id;
+  if (scan.status !== "ok") return setScr({ mode: "msg", status: scan.status }, 12000);
+  const failed = scr.mode === "confirm" && scan.reqId === scr.reqId && !scan.did;
+  setScr({ mode: "card", scan, failed }, 30000);
+  if (scan.did === "up" || (scan.st.g && scan.st.s >= scan.st.g && !scan.did)) setTimeout(party, 150);
+}
+function choose(act) {
+  const s = scr.scan, id = rid();
+  setReq({ id, n: s.n, uid: s.uid, act, state: "wait" }); pushNow();
+  setScr({ mode: "confirm", scan: s, act, reqId: id });
+  scrTimer = setTimeout(() => cancelChoice(id), PEND_MS);
+}
+function cancelChoice(id) {
+  if (req && req.id === id && req.state === "wait") { setReq({ ...req, state: "cancel" }); pushNow(); }
+  setScr({ mode: "idle" });
+}
+function vScreen() {
+  const foot = `<p class="muted center" style="margin-top:18px">${esc(syncInfo || "")}</p>`;
+  if (scr.mode === "msg") return `<div class="panel warn center"><div class="big">${scr.status === "retry" ? "✋" : "🙋"}</div>
+    <h2>${{ bad: "Kortet stämmer inte", blank: "Kortet är tomt", retry: "Det blev inte läst" }[scr.status]}</h2>
+    <p>${scr.status === "retry" ? "Blippa igen och håll kvar kortet tills mobilen vibrerar." : "Gå till din lärare med kortet."}</p></div>${foot}`;
+  if (scr.mode === "confirm") return `<div class="armed"><div class="confirm-icon big-icon"><i></i><i></i><span>📲</span></div>
+    <h2>Blippa kortet igen för att bekräfta</h2><p><span class="what">${ACT_TEXT[scr.act]}</span></p>
+    <p><small>Kort nr ${scr.scan.n}. Håll kvar kortet tills mobilen vibrerar.</small></p>${countdown()}
+    <button onclick="cancelChoice('${scr.reqId}')">Ångra</button></div>${foot}`;
+  if (scr.mode === "card") {
+    const { st, did, note } = scr.scan, next = levels[st.l];
+    return `${did ? `<div class="banner">✓ Klart: ${ACT_TEXT[did]}</div>` : ""}
+      ${scr.failed ? `<div class="note">Det gick inte. Saldot räcker inte till det.</div>` : ""}
+      ${note ? `<div class="note">${esc(note)}</div>` : ""}
+      <div class="split"><div>${hero(st)}
+      <div class="tiles">${statTile(st.s, "⭐", "stickers")}${statTile(st.e, "🧽", "sudd")}${statTile(st.p, "✏️", "pennor")}</div>
+      ${worthLine(st)}</div>
+      <div class="panel"><h3>Vad vill du göra?</h3><div class="choices">
+        <button onclick="choose('p-1')" ${st.p < 1 ? "disabled" : ""}>✏️ Hämta en penna</button>
+        <button onclick="choose('e-1')" ${st.e < 1 ? "disabled" : ""}>🧽 Hämta ett sudd</button>
+        ${st.g && next ? `<button onclick="choose('up')" ${st.s < st.g ? "disabled" : ""}>⬆️ Uppgradera till ${esc(next.name)} (−${st.g} ⭐)</button>` : ""}
+        <button class="primary" onclick="setScr({mode:'idle'})">Klar</button></div></div></div>`;
+  }
+  return `<div class="panel center wait"><div class="pulse"><i></i><i></i><i></i><span>🪪</span></div>
+    <h2>Blippa ditt kort mot läsaren</h2><p class="muted">Ditt saldo visas här.</p></div>${foot}`;
+}
 
 $("#nfcBtn").onclick = async () => {
   if (!("NDEFReader" in window)) return toast("Använd Chrome på en Android-mobil.");
@@ -797,7 +962,7 @@ document.addEventListener("fullscreenchange", () => {   // lämnar man helskärm
 });
 document.addEventListener("visibilitychange", keepAwake);
 
-show({ name: "wait" });
+show({ name: station && secret ? "station" : role ? "screen" : "wait" });
 if (gh) { setCloud("", syncInfo); sync(); }
 </script>
 </body>

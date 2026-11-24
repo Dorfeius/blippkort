@@ -108,7 +108,7 @@
 const MIME = "application/x-bk";
 const DEFAULT_LEVELS = [{ name: "Blyertspenna", cost: 0 }, { name: "Stiftpenna", cost: 5 },
                         { name: "Gelpenna", cost: 10 }, { name: "Guldpenna", cost: 15 }];
-const MODES = [["view", "Visa / ändra"], ["s+1", "+1 ⭐"], ["e-1", "−1 🧽"], ["p-1", "−1 ✏️"],
+const MODES = [["view", "Läs saldo"], ["s+1", "+1 ⭐"], ["e-1", "−1 🧽"], ["p-1", "−1 ✏️"],
                ["e+1", "+1 🧽"], ["p+1", "+1 ✏️"], ["new", "Nya kort"]];
 const $ = (s) => document.querySelector(s);
 const app = $("#app");
@@ -175,7 +175,7 @@ async function writeCard(uid, st) {
 // ---------- ett blipp ----------
 async function onTap(serial, message) {
   if (busy) return;
-  busy = true;
+  busy = true; armModeReset();
   try { await handleTap(normUid(serial), parseCard(message)); }
   catch (e) { buzz(false); toast(e.name === "AbortError" ? "Hann inte skriva. Håll kortet stilla och blippa igen."
                                                         : "Det gick inte: håll kortet stilla och blippa igen."); }
@@ -238,7 +238,7 @@ async function handleTap(uid, card) {
   }
   if (quick) return show({ name: "card", uid, st: card, note });
   if (mode === "new") return show({ name: "card", uid, st: card, note: "Kortet är redan klart (nr " + card.n + ")." });
-  show({ name: "edit", uid, st: { ...card }, orig: card });
+  show({ name: "card", uid, st: card });            // standard: läs bara av kortet
 }
 
 function nextNumber() { let n = 1; while (backup[n]) n++; return n; }
@@ -273,7 +273,19 @@ function modeBar() {
   return `<div class="modes">${MODES.map(([id, label]) =>
     `<button class="${id === mode ? "on" : ""}" onclick="setMode('${id}')">${label}</button>`).join("")}</div>`;
 }
-function setMode(id) { mode = id; pending = null; show({ name: "wait" }); }
+function setMode(id) { mode = id; pending = null; armModeReset(); show({ name: "wait" }); }
+// Appen utgår alltid från att läsa saldo: andra lägen släpper efter en stund utan blipp.
+let modeTimer = null;
+function armModeReset() {
+  clearTimeout(modeTimer);
+  if (mode !== "view") modeTimer = setTimeout(resetMode, 45000);
+}
+function resetMode() {
+  if (mode === "view") return;
+  mode = "view"; wantN = null;
+  if (["wait", "card"].includes(view.name)) show(view.name === "card" ? { ...view, saved: false, party: false } : view);
+}
+function openEdit() { show({ name: "edit", uid: view.uid, st: { ...view.st }, orig: view.st }); }
 
 function progress(st) {
   const cost = st.g, name = levels[st.l] ? levels[st.l].name : "nästa penna";
@@ -306,7 +318,7 @@ function vWait() {
     : !reader ? "Tryck på Starta NFC först."
     : mode === "new" ? `Blippa tomma kort ett i taget. Nästa får nummer
       <input type="number" min="1" max="999" value="${upcoming()}" style="width:84px;padding:6px 10px" onchange="setWant(this.value)">`
-    : mode !== "view" ? "Blippa kort ett i taget. Varje blipp ändrar saldot direkt."
+    : mode !== "view" ? "Blippa kort ett i taget. Varje blipp ändrar saldot direkt. Går tillbaka till Läs saldo efter en stund."
     : "Håll kortet mot mobilens baksida.";
   return `<div class="panel center wait"><div class="pulse"><i></i><i></i><i></i><span>🪪</span></div>
     <h2>Blippa ditt kort!</h2><p class="muted">${hint}</p></div>`;
@@ -322,7 +334,8 @@ function vCard({ st, saved, created, note }) {
     ${hero(st)}
     <div class="tiles">${statTile(st.s, "⭐", "stickers")}${statTile(st.e, "🧽", "sudd")}${statTile(st.p, "✏️", "pennor")}</div>
     <p style="margin:0 0 16px"><span class="note" style="margin:0">💰 Värde om du byter in allt: <b>${Number.isInteger(st.w) ? st.w : worth(st)} ⭐</b></span></p>
-    <button onclick="show({name:'wait'})">Klar</button>`;
+    <div class="row"><button onclick="show({name:'wait'})">Klar</button>
+      ${secret && view.uid ? `<button onclick="openEdit()">Ändra kortet</button>` : ""}</div>`;
 }
 
 function vBlank() {

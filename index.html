@@ -98,6 +98,18 @@
   .confirm-text span { font-size:18px; font-weight:800; }
   .confirm-text small { opacity:.85; font-weight:600; }
   .confirm button { flex:none; background:rgba(255,255,255,.22); color:#fff; box-shadow:none; padding:10px 14px; }
+  .count { height:6px; border-radius:3px; background:rgba(255,255,255,.3); overflow:hidden; margin-top:8px; }
+  .count i { display:block; height:100%; background:#fff; transform-origin:0 50%; animation:shrink linear forwards; }
+  .panel .count { background:var(--line); } .panel .count i { background:var(--accent); }
+  .armed { margin:16px 0; padding:30px 20px 24px; border-radius:30px; color:#fff; text-align:center;
+           background:linear-gradient(135deg,#6c4cff,#ff5ca8); box-shadow:0 14px 34px rgba(80,40,160,.45);
+           animation:grow .5s cubic-bezier(.2,1.5,.4,1) both; }
+  .armed h2 { font-size:28px; line-height:1.2; margin:18px 0 8px; } .armed p { margin:6px 0; }
+  .armed .what { display:inline-block; background:#fff; color:#4a2fd1; padding:2px 14px; border-radius:999px; white-space:nowrap; }
+  .armed button { margin-top:18px; background:rgba(255,255,255,.22); color:#fff; box-shadow:none; }
+  .big-icon { width:120px; height:120px; font-size:60px; margin:0 auto; }
+  .adding { border-color:var(--ok); }
+  @keyframes shrink { from { transform:scaleX(1); } to { transform:scaleX(0); } }
   @keyframes grow { from { transform:scale(.15); opacity:0; } to { transform:scale(1); opacity:1; } }
   @keyframes puff { 0% { transform:scale(1); } 45% { transform:scale(1.05); } 100% { transform:scale(1); } }
   table { width:100%; border-collapse:collapse; }
@@ -110,7 +122,7 @@
   @keyframes ring { 0% { transform:scale(.45); opacity:.9; } 100% { transform:scale(1.15); opacity:0; } }
   @keyframes bob { 0%,100% { transform:translateY(0); } 50% { transform:translateY(-6px); } }
   @keyframes fall { to { transform:translateY(110vh) rotate(540deg); opacity:.9; } }
-  @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important; } }
+  @media (prefers-reduced-motion: reduce) { *:not(.count i) { animation:none !important; transition:none !important; } }
 </style>
 </head>
 <body>
@@ -129,8 +141,9 @@
 const MIME = "application/x-bk";
 const DEFAULT_LEVELS = [{ name: "Blyertspenna", cost: 0 }, { name: "Stiftpenna", cost: 5 },
                         { name: "Gelpenna", cost: 10 }, { name: "Guldpenna", cost: 15 }];
-const MODES = [["view", "Läs saldo"], ["s+1", "+1 ⭐"], ["e-1", "−1 🧽"], ["p-1", "−1 ✏️"],
-               ["e+1", "+1 🧽"], ["p+1", "+1 ✏️"], ["new", "Nya kort"]];
+const ICON = { s: "⭐", e: "🧽", p: "✏️" };
+const QUICK = [["s", 1], ["e", -1], ["p", -1]];       // snabbval: gäller ETT kort, sedan läser appen bara igen
+const PEND_MS = 40000;                                // så länge väntar en ändring på sitt blipp
 const $ = (s) => document.querySelector(s);
 const app = $("#app");
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
@@ -143,9 +156,9 @@ let levels = load("bk_levels", DEFAULT_LEVELS);
 let cfg = { se: 2, sp: 4, ve: 2, vp: 1, ...load("bk_cfg", {}) };   // start-sudd, start-pennor, värde per sudd/penna i ⭐
 let bonus = load("bk_bonus", {});         // kortnummer -> [{ a: antal, t: text }], läggs på vid nästa blipp
 let backup = load("bk_cards", {});        // kortnummer -> senast kända läge
-let mode = "view";
+let adding = false;                       // "lägg till nya kort": skriver bara på tomma, okända kort
 let view = { name: "wait" };
-let pending = null;                       // { uid, state, text }: väntar på att kortet blippas igen
+let pending = null;                       // det enda som får ändra ett kort: { uid, state } eller { quick: [fält, ändring] }
 let reader = null, busy = false, clearTimer = null;
 
 function toast(text) {
@@ -196,78 +209,93 @@ async function writeCard(uid, st) {
 // ---------- ett blipp ----------
 async function onTap(serial, message) {
   if (busy) return;
-  busy = true; armModeReset();
+  busy = true; if (adding) armAdding();
   try { await handleTap(normUid(serial), parseCard(message)); }
   catch (e) { buzz(false); show({ name: "fail" }); }
   finally { busy = false; }
 }
 
+// Grundregel: ett blipp LÄSER bara. Kortet ändras endast om något väntar synligt på skärmen (pending),
+// och det som väntar gäller ett enda kort och släpper av sig självt efter en stund.
+let pendTimer = null;
+function arm(job) {
+  pending = job; clearTimeout(pendTimer);
+  pendTimer = setTimeout(() => {
+    if (!pending || busy) return;
+    pending = null; toast("Avbrutet: inget kort blippades i tid. Inget ändrades."); show({ name: "wait" });
+  }, PEND_MS);
+}
+function disarm() { pending = null; clearTimeout(pendTimer); }
+const signed = (d) => (d > 0 ? "+" : "−") + Math.abs(d);
+const quickLabel = (q) => `${signed(q[1])} ${ICON[q[0]]}`;
+function applyQuick(st, q) {              // true om ändringen gick att göra
+  if (!q || st[q[0]] + q[1] < 0) return false;
+  st[q[0]] += q[1]; return true;
+}
+const opened = (uid, st, extra = {}) => show({ name: "edit", uid, st: { ...st }, orig: st, ...extra });
+
 async function handleTap(uid, card) {
   if (!uid) return toast("Kortet saknar ID");
+  if (!secret) return show(card ? { name: "card", uid, st: card } : { name: "blank", uid });   // elevläge: bara visa
 
-  if (pending) {                                   // andra blippet: skriv det som väntar
-    if (uid !== pending.uid) { buzz(false); return toast("Det är inte samma kort. Blippa rätt kort."); }
-    const { state, oldN } = pending, before = backup[state.n];
+  if (pending && pending.uid) {                    // en ändring väntar på just det här kortet
+    if (uid !== pending.uid) { buzz(false); return toast("Det är inte samma kort. Blippa kortet du ändrade."); }
+    const { state, oldN, created } = pending, before = backup[state.n];
     const st = await writeCard(uid, state);
     if (oldN && oldN !== st.n) {                   // kortet har fått nytt nummer: flytta kopia och väntande bonus
       if (backup[oldN] && backup[oldN].uid === uid) { delete backup[oldN]; save("bk_cards", backup); }
       if (bonus[oldN]) { bonus[st.n] = [...(bonus[st.n] || []), ...bonus[oldN]]; delete bonus[oldN]; save("bk_bonus", bonus); }
     }
-    pending = null; buzz(true);
-    return show({ name: "card", uid, st, saved: true, party: !!before && st.l > before.l });
+    disarm(); buzz(true);
+    return opened(uid, st, { saved: true, created, party: !!before && st.l > before.l });
   }
+  const quick = pending && pending.quick;          // snabbval: gäller bara det här blippet
 
-  if (!secret) {                                   // elevläge: bara visa
-    return show(card ? { name: "card", uid, st: card } : { name: "blank", uid });
-  }
-
-  if (!card) {                                     // tomt kort i adminläge
+  if (!card) {                                     // tomt kort
     // Känner mobilen igen taggen har en skrivning avbrutits och tömt kortet: lägg tillbaka kopian direkt.
     const lostN = Object.keys(backup).find((k) => backup[k].uid === uid);
     if (lostN) {
-      const b = backup[lostN];
-      const st = await writeCard(uid, { n: Number(lostN), s: b.s, e: b.e, p: b.p, l: b.l, c: b.c });
-      buzz(true);
-      return show({ name: "card", uid, st, saved: true,
-        note: "Kortet hade tappat sin data (avbruten skrivning) och är återställt från kopian. Gör om din senaste ändring." });
+      const b = backup[lostN], base = { n: Number(lostN), s: b.s, e: b.e, p: b.p, l: b.l, c: b.c };
+      const did = applyQuick(base, quick);
+      const st = await writeCard(uid, base);
+      disarm(); buzz(true);
+      return opened(uid, st, { saved: true, note: "Kortet hade tappat sin data (avbruten skrivning) och är återställt från kopian."
+        + (did ? "" : " Gör om din senaste ändring.") });
     }
-    if (mode !== "new") return show({ name: "blank", uid });
+    disarm();
+    if (!adding) return show({ name: "blank", uid });
     const n = upcoming(); wantN = backup[n + 1] ? null : n + 1;
     const st = await writeCard(uid, { n, s: 0, e: cfg.se, p: cfg.sp, l: 1, c: 0 });
     buzz(true);
-    return show({ name: "card", uid, st, saved: true, created: true });
+    return opened(uid, st, { saved: true, created: true });
   }
 
   const valid = card.h === await signature(uid, card);
   const known = backup[card.n];
-  if (!valid) return show({ name: "bad", uid, card, reason: "sig" });
-  if (known && known.uid !== uid) return show({ name: "bad", uid, card, reason: "dup" });
-  if (known && known.c > card.c) return show({ name: "bad", uid, card, reason: "old" });
+  const bad = !valid ? "sig" : known && known.uid !== uid ? "dup" : known && known.c > card.c ? "old" : "";
+  if (bad) { disarm(); return show({ name: "bad", uid, card, reason: bad }); }
   if (!known || known.c < card.c) {                // kortet ändrat av annan admin-mobil med samma nyckel
     backup[card.n] = { uid, s: card.s, e: card.e, p: card.p, l: card.l, c: card.c, ts: Date.now() };
     save("bk_cards", backup);
   }
 
-  const gifts = bonus[card.n] || [];             // bonusar som läraren loggat sedan sist
+  const gifts = bonus[card.n] || [];               // bonusar som läraren loggat sedan sist
   const extra = gifts.reduce((sum, g) => sum + g.a, 0);
   const why = gifts.map((g) => g.t).filter(Boolean).join(", ");
   const st = { ...card, s: card.s + extra };
-  let note = extra ? `🎁 Bonus +${extra} ⭐${why ? ": " + why : ""}` : "", changed = extra > 0;
+  let note = extra ? `🎁 Bonus +${extra} ⭐${why ? ": " + why : ""}` : "";
+  const did = applyQuick(st, quick);
+  if (quick && !did) { buzz(false); note = ("Saldot är redan 0, inget ändrat. " + note).trim(); }
+  if (adding) note = ("Kortet är redan klart (nr " + card.n + "). " + note).trim();
 
-  const quick = /^([sep])([+-]1)$/.exec(mode);
-  if (quick) {
-    if (st[quick[1]] + Number(quick[2]) < 0) { buzz(false); note = ("Saldot är redan 0, inget ändrat. " + note).trim(); }
-    else { st[quick[1]] += Number(quick[2]); changed = true; }
-  }
-  if (changed) {
+  if (extra || did) {
     const done = await writeCard(uid, st);
     if (extra) { delete bonus[card.n]; save("bk_bonus", bonus); }
-    buzz(true);
-    return show({ name: "card", uid, st: done, saved: true, note, party: extra > 0 });
+    disarm(); buzz(true);
+    return opened(uid, done, { saved: true, note, party: extra > 0, again: did ? quick : null });
   }
-  if (quick) return show({ name: "card", uid, st: card, note });
-  if (mode === "new") return show({ name: "card", uid, st: card, note: "Kortet är redan klart (nr " + card.n + ")." });
-  show({ name: "card", uid, st: card });            // standard: läs bara av kortet
+  disarm();
+  opened(uid, card, { note });                     // standard: läs bara av kortet
 }
 
 function nextNumber() { let n = 1; while (backup[n]) n++; return n; }
@@ -290,31 +318,22 @@ function renumber() {
 
 // ---------- vyer ----------
 function show(v) {
+  if (!["edit", "fail", "armed"].includes(v.name)) disarm();          // lämnar man vyn gäller ändringen inte längre
+  if (adding && !["wait", "edit"].includes(v.name)) stopAdding(true);
   view = v; clearTimeout(clearTimer);
   $("#adminBtn").textContent = secret ? "Meny" : "Admin";
-  app.innerHTML = modeBar() + ({ wait: vWait, card: vCard, blank: vBlank, bad: vBad, edit: vEdit, fail: vFail,
-                                 menu: vMenu, list: vList, levels: vLevels, bonus: vBonus }[v.name])(v);
-  if (v.name === "card" || v.name === "blank") clearTimer = setTimeout(() => show({ name: "wait" }), 20000);
+  app.innerHTML = ({ wait: vWait, card: vCard, blank: vBlank, bad: vBad, edit: vEdit, fail: vFail, armed: vArmed,
+                     menu: vMenu, list: vList, levels: vLevels, bonus: vBonus }[v.name])(v);
+  // ett avläst kort ligger inte kvar på skärmen till nästa person
+  if (["card", "blank", "bad"].includes(v.name) || (v.name === "edit" && !pending))
+    clearTimer = setTimeout(() => show({ name: "wait" }), 25000);
 }
 
-function modeBar() {
-  if (!secret || ["menu", "list", "levels", "bonus"].includes(view.name)) return "";
-  return `<div class="modes">${MODES.map(([id, label]) =>
-    `<button class="${id === mode ? "on" : ""}" onclick="setMode('${id}')">${label}</button>`).join("")}</div>`;
-}
-function setMode(id) { mode = id; pending = null; armModeReset(); show({ name: "wait" }); }
-// Appen utgår alltid från att läsa saldo: andra lägen släpper efter en stund utan blipp.
-let modeTimer = null;
-function armModeReset() {
-  clearTimeout(modeTimer);
-  if (mode !== "view") modeTimer = setTimeout(resetMode, 45000);
-}
-function resetMode() {
-  if (mode === "view") return;
-  mode = "view"; wantN = null;
-  if (["wait", "card"].includes(view.name)) show(view.name === "card" ? { ...view, saved: false, party: false } : view);
-}
-function openEdit() { show({ name: "edit", uid: view.uid, st: { ...view.st }, orig: view.st }); }
+function armQuick(k, d) { arm({ quick: [k, d] }); show({ name: "armed" }); }
+let addTimer = null;
+function armAdding() { clearTimeout(addTimer); addTimer = setTimeout(() => { if (adding && !busy) { stopAdding(true); show({ name: "wait" }); } }, 60000); }
+function startAdding() { adding = true; view = { name: "wait" }; armAdding(); show(view); }
+function stopAdding(quiet) { adding = false; wantN = null; clearTimeout(addTimer); if (!quiet) show({ name: "wait" }); }
 
 function progress(st) {
   const cost = st.g, name = levels[st.l] ? levels[st.l].name : "nästa penna";
@@ -343,35 +362,49 @@ function party() {
 const levelName = (l) => esc(levels[l - 1] ? levels[l - 1].name : "Nivå " + l);
 
 function vWait() {
+  if (adding) return `<div class="panel center wait adding"><div class="pulse"><i></i><i></i><i></i><span>➕</span></div>
+    <h2>Lägg till nya kort</h2>
+    <p>Blippa tomma kort ett i taget. Nästa får nummer
+      <input type="number" min="1" max="999" value="${upcoming()}" style="width:84px;padding:6px 10px" onchange="setWant(this.value)"></p>
+    <p class="muted">Kort som redan är klara läses bara av.</p>
+    <button class="primary" onclick="stopAdding()">Klar med nya kort</button></div>`;
   const hint = !("NDEFReader" in window) ? "Den här webbläsaren kan inte läsa NFC. Använd Chrome på en Android-mobil."
-    : !reader ? "Tryck på Starta NFC först."
-    : mode === "new" ? `Blippa tomma kort ett i taget. Nästa får nummer
-      <input type="number" min="1" max="999" value="${upcoming()}" style="width:84px;padding:6px 10px" onchange="setWant(this.value)">`
-    : mode !== "view" ? "Blippa kort ett i taget. Håll kvar kortet tills mobilen vibrerar. Går tillbaka till Läs saldo efter en stund."
-    : "Håll kortet mot mobilens baksida.";
+    : !reader ? "Tryck på Starta NFC först." : "Håll kortet mot mobilens baksida.";
   return `<div class="panel center wait"><div class="pulse"><i></i><i></i><i></i><span>🪪</span></div>
-    <h2>Blippa ditt kort!</h2><p class="muted">${hint}</p></div>`;
+    <h2>${secret ? "Blippa ett kort" : "Blippa ditt kort!"}</h2><p class="muted">${hint}</p>
+    ${secret ? `<p class="muted" style="margin-bottom:0">Ett blipp läser bara av kortet. Inget ändras.</p>` : ""}</div>
+    ${secret && reader ? `<div class="panel"><h3>Snabbval för nästa kort</h3><div class="row">
+      ${QUICK.map(([k, d]) => `<button onclick="armQuick('${k}',${d})">${quickLabel([k, d])}</button>`).join("")}</div>
+      <p class="muted" style="margin:10px 0 0">Gäller ett enda kort. Sedan läser appen bara igen.</p></div>` : ""}`;
 }
 
 const statTile = (value, icon, label, extra = "") =>
   `<div class="tile"><em>${icon}</em><b>${value}</b>${label}${extra}</div>`;
+const worthLine = (st) => `<p style="margin:0 0 16px"><span class="note" style="margin:0">💰 Värde om du byter in allt: <b>${worth(st)} ⭐</b></span></p>`;
 
-function vCard({ st, saved, created, note }) {
-  if (view.party || (st.g && st.s >= st.g && (!secret || st.s === st.g))) setTimeout(party, 150);
-  return `${saved ? `<div class="banner">✓ ${created ? "Nytt kort skapat" : "Sparat på kortet"}</div>` : ""}
-    ${note ? `<div class="note">${esc(note)}</div>` : ""}
-    ${hero(st)}
+function vCard({ st }) {                  // elevens vy: bara läsa
+  if (st.g && st.s >= st.g) setTimeout(party, 150);
+  return `${hero(st)}
     <div class="tiles">${statTile(st.s, "⭐", "stickers")}${statTile(st.e, "🧽", "sudd")}${statTile(st.p, "✏️", "pennor")}</div>
-    <p style="margin:0 0 16px"><span class="note" style="margin:0">💰 Värde om du byter in allt: <b>${Number.isInteger(st.w) ? st.w : worth(st)} ⭐</b></span></p>
-    <div class="row"><button onclick="show({name:'wait'})">Klar</button>
-      ${secret && view.uid ? `<button onclick="openEdit()">Ändra kortet</button>` : ""}</div>`;
+    ${worthLine({ ...st, s: Number.isInteger(st.w) ? st.w - st.e * cfg.ve - st.p * cfg.vp : st.s })}
+    <button onclick="show({name:'wait'})">Klar</button>`;
+}
+
+const countdown = () => `<div class="count"><i style="animation-duration:${PEND_MS}ms"></i></div>`;
+function vArmed() {                       // något väntar på ett blipp: hela skärmen säger det
+  const q = pending.quick;
+  return `<div class="armed"><div class="confirm-icon big-icon"><i></i><i></i><span>📲</span></div>
+    <h2>${q ? `Blippa kortet som ska få <span class="what">${quickLabel(q)}</span>` : "Blippa kortet igen"}</h2>
+    <p>${q ? "Gäller bara nästa kort. Sedan läser appen bara igen." : esc(pending.text || "")}</p>
+    <p><small>Håll kvar kortet tills mobilen vibrerar.</small></p>${countdown()}
+    <button onclick="show({name:'wait'})">Avbryt</button></div>`;
 }
 
 function vFail() {
   return `<div class="panel warn center"><div class="big">✋</div><h2>Det blev inte sparat</h2>
     <p>Kortet togs bort för tidigt eller låg inte still.</p>
     <p><b>Blippa kortet igen och håll kvar det tills mobilen vibrerar och ✓ visas.</b></p>
-    <p class="muted">${pending ? "Din ändring väntar och sparas vid nästa blipp."
+    <p class="muted">${pending ? "Din ändring väntar och sparas vid nästa blipp." + countdown()
       : "Skulle kortet ha blivit tomt återställs det automatiskt från kopian i mobilen."}</p></div>`;
 }
 
@@ -407,34 +440,38 @@ function editDelta(st, orig) {            // t.ex. ["+2 ⭐", "−1 ✏️"]
   if (st.n !== orig.n) out.push(`nr ${orig.n} → ${st.n}`);
   return out;
 }
-function vEdit({ st, orig }) {
-  const sign = (d) => (d > 0 ? "+" : "−") + Math.abs(d);
-  const tile = (k, icon, label) => `<div class="tile ${st[k] !== orig[k] ? "hot" : ""}">
-    ${st[k] !== orig[k] ? `<span class="badge">${sign(st[k] - orig[k])}</span>` : ""}<em>${icon}</em><b>${st[k]}</b>${label}<div class="row">
+function vEdit({ st, orig, saved, created, note, again }) {
+  if (view.party && !view.partied) { view.partied = true; setTimeout(party, 150); }
+  const tile = (k, label) => `<div class="tile ${st[k] !== orig[k] ? "hot" : ""}">
+    ${st[k] !== orig[k] ? `<span class="badge">${signed(st[k] - orig[k])}</span>` : ""}<em>${ICON[k]}</em><b>${st[k]}</b>${label}<div class="row">
     <button onclick="bump('${k}',-1)" ${st[k] < 1 ? "disabled" : ""}>−1</button>
     <button class="primary" onclick="bump('${k}',1)">+1</button></div></div>`;
   const cost = nextCost(st.l), delta = editDelta(st, orig);
   const first = pending && !view.grown;            // bubblan växer fram första gången, sedan bara en liten puff
   if (pending) view.grown = true;
-  return `<div class="still">${hero({ ...st, g: cost })}
-    <div class="tiles">${tile("s", "⭐", "stickers")}${tile("e", "🧽", "sudd")}${tile("p", "✏️", "pennor")}</div></div>
+  return `${saved ? `<div class="banner">✓ ${created ? "Nytt kort skapat" : "Sparat på kortet"}</div>` : ""}
+    ${note ? `<div class="note">${esc(note)}</div>` : ""}
+    <div class="${view.still ? "still" : ""}">${hero({ ...st, g: cost })}
+    <div class="tiles">${tile("s", "stickers")}${tile("e", "sudd")}${tile("p", "pennor")}</div></div>
+    ${worthLine(st)}
     <div class="row" style="margin-bottom:16px">
       ${cfg.ve ? `<button onclick="trade('e',${cfg.ve})" ${st.e < 1 ? "disabled" : ""}>Byt in 1 🧽 → +${cfg.ve} ⭐</button>` : ""}
-      ${cfg.vp ? `<button onclick="trade('p',${cfg.vp})" ${st.p < 1 ? "disabled" : ""}>Byt in 1 ✏️ → +${cfg.vp} ⭐</button>` : ""}</div>
-    ${cost ? `<p><button onclick="upgrade()" ${st.s < cost ? "disabled" : ""}>⬆️ Uppgradera till ${esc(levels[st.l].name)} (−${cost} ⭐)</button></p>` : ""}
-    <div class="row"><button onclick="pending=null;show({name:'wait'})">${pending ? "Avbryt" : "Klar"}</button>
+      ${cfg.vp ? `<button onclick="trade('p',${cfg.vp})" ${st.p < 1 ? "disabled" : ""}>Byt in 1 ✏️ → +${cfg.vp} ⭐</button>` : ""}
+      ${cost ? `<button onclick="upgrade()" ${st.s < cost ? "disabled" : ""}>⬆️ Uppgradera till ${esc(levels[st.l].name)} (−${cost} ⭐)</button>` : ""}</div>
+    <div class="row"><button class="${pending ? "" : "primary"}" onclick="show({name:'wait'})">${pending ? "Avbryt" : "Klar"}</button>
+      ${again && !pending ? `<button onclick="armQuick('${again[0]}',${again[1]})">${quickLabel(again)} på nästa kort</button>` : ""}
       <button onclick="renumber()">Byt kortnummer</button></div>
     ${pending ? `<div class="spacer"></div><div class="confirm ${first ? "grow" : "puff"}">
       <div class="confirm-icon"><i></i><i></i><span>📲</span></div>
       <div class="confirm-text"><b>Blippa kortet för att bekräfta</b><span>${delta.join(" · ")}</span>
-        <small>Inget är sparat förrän du blippar.</small></div>
+        <small>Inget är sparat förrän du blippar.</small>${countdown()}</div>
       <button onclick="undoEdit()">Ångra</button></div>` : ""}`;
 }
-// Varje ändring väntar direkt på ett blipp: ingen extra spara-knapp att glömma.
+// Varje ändring väntar direkt på ett blipp av samma kort: ingen extra spara-knapp att glömma.
 function touched() {
   const changed = ["n", "s", "e", "p", "l"].some((k) => view.st[k] !== view.orig[k]);
-  pending = changed ? { uid: view.uid, state: view.st, oldN: view.orig.n } : null;
-  if (!changed) view.grown = false;
+  if (changed) arm({ uid: view.uid, state: view.st, oldN: view.orig.n }); else { disarm(); view.grown = false; }
+  view.saved = false; view.note = ""; view.again = null; view.still = true;
   show(view);
 }
 function bump(k, d) { view.st[k] = Math.max(0, view.st[k] + d); touched(); }
@@ -445,16 +482,15 @@ function undoEdit() { view.st = { ...view.orig }; touched(); }
 function prepare(n, fromBackup) {      // tomt/ogiltigt kort: bestäm innehållet, skriv vid nästa blipp
   const b = backup[n];
   const state = fromBackup && b ? { n, s: b.s, e: b.e, p: b.p, l: b.l, c: b.c } : { n, s: 0, e: cfg.se, p: cfg.sp, l: 1, c: 0 };
-  pending = { uid: view.uid, state };
-  app.innerHTML = `<div class="panel center"><div class="big">👉</div><h2>Blippa kortet igen</h2>
-    <p class="muted">Då skrivs kort nr ${n} till kortet.</p></div>
-    <button onclick="pending=null;show({name:'wait'})">Avbryt</button>`;
+  arm({ uid: view.uid, state, created: !fromBackup, text: `Då skrivs kort nr ${n} till kortet.` });
+  show({ name: "armed" });
 }
 
 // ---------- admin ----------
 function vMenu() {
   return `<div class="panel"><h3>Admin</h3><div class="row">
     <button class="primary" onclick="show({name:'bonus'})">🎁 Ge bonus</button>
+    <button onclick="startAdding()">➕ Lägg till nya kort</button>
     <button onclick="show({name:'list'})">Alla kort</button>
     <button onclick="show({name:'levels'})">Nivåer och regler</button>
     <button onclick="exportBackup()">Spara kopia som fil</button>
@@ -540,7 +576,7 @@ async function importBackup(input) {
 }
 function logout() {
   if (!confirm("Ta bort nyckeln och kopian från den här mobilen? Korten påverkas inte.")) return;
-  secret = null; backup = {}; bonus = {}; mode = "view"; pending = null;
+  secret = null; backup = {}; bonus = {}; adding = false; disarm();
   try { localStorage.removeItem("bk_key"); localStorage.removeItem("bk_cards"); localStorage.removeItem("bk_bonus"); } catch {}
   show({ name: "wait" });
 }

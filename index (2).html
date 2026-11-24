@@ -1,0 +1,476 @@
+<!doctype html>
+<html lang="sv">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blippkort</title>
+<style>
+  :root { --bg:#fff8ef; --card:#fff; --ink:#231f3a; --muted:#77728c; --line:#e9e2f6;
+          --accent:#6c4cff; --accent-d:#4a2fd1; --ok:#12a66a; --bad:#e5484d;
+          --blob1:#ffd9ec; --blob2:#d6ecff; --blob3:#fff0b8; --shadow:0 10px 28px rgba(70,45,140,.12); }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#141226; --card:#1f1c38; --ink:#f3f1ff; --muted:#a6a1c4; --line:#353060;
+            --blob1:#3a1d4d; --blob2:#16294d; --blob3:#3d3215; --shadow:0 10px 28px rgba(0,0,0,.4); }
+  }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; min-height:100vh; color:var(--ink);
+         font:600 17px/1.45 ui-rounded, "SF Pro Rounded", "Nunito", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+         background:radial-gradient(circle at 0% 0%, var(--blob1), transparent 42%),
+                    radial-gradient(circle at 100% 8%, var(--blob2), transparent 45%),
+                    radial-gradient(circle at 50% 100%, var(--blob3), transparent 50%), var(--bg);
+         background-attachment:fixed; }
+  header { display:flex; align-items:center; gap:10px; padding:14px 16px 8px; max-width:640px; margin:0 auto; }
+  header h1 { font-size:26px; font-weight:900; letter-spacing:-.5px; margin:0; flex:1;
+         background:linear-gradient(90deg,#6c4cff,#ff5ca8,#ff9d2e); -webkit-background-clip:text; background-clip:text; color:transparent; }
+  main { max-width:640px; margin:0 auto; padding:0 16px 56px; }
+  button { font:inherit; font-weight:800; border:0; background:var(--card); color:var(--ink); padding:12px 18px;
+           border-radius:999px; cursor:pointer; box-shadow:0 4px 0 var(--line); transition:transform .08s, box-shadow .08s; }
+  button:active { transform:translateY(3px); box-shadow:0 1px 0 var(--line); }
+  button.primary, button.on { background:var(--accent); color:#fff; box-shadow:0 4px 0 var(--accent-d); }
+  button.primary:active, button.on:active { box-shadow:0 1px 0 var(--accent-d); }
+  button.danger { color:var(--bad); }
+  button:disabled { opacity:.4; }
+  input, select { font:inherit; padding:10px 14px; border:2px solid var(--line); border-radius:14px;
+          background:var(--card); color:var(--ink); max-width:100%; }
+  .panel { background:var(--card); border-radius:26px; padding:20px; margin:16px 0; box-shadow:var(--shadow);
+           border:2px solid transparent; animation:pop .35s cubic-bezier(.2,1.4,.4,1) both; }
+  .warn { border-color:var(--bad); }
+  .muted { color:var(--muted); font-weight:500; } .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  .center { text-align:center; } .big { font-size:64px; line-height:1; }
+  h2 { margin:10px 0 6px; font-size:26px; font-weight:900; } h3 { margin:0 0 10px; font-weight:900; }
+  .modes { display:flex; gap:8px; overflow-x:auto; padding:6px 2px 12px; scrollbar-width:none; }
+  .modes::-webkit-scrollbar { display:none; } .modes button { flex:none; padding:10px 16px; }
+
+  /* väntläge: pulserande ringar */
+  .wait { padding:36px 16px 28px; }
+  .pulse { position:relative; width:150px; height:150px; margin:0 auto 10px; display:grid; place-items:center; font-size:64px; }
+  .pulse i { position:absolute; inset:0; border-radius:50%; border:4px solid var(--accent); opacity:0; animation:ring 2.4s ease-out infinite; }
+  .pulse i:nth-child(2) { animation-delay:.8s; border-color:#ff5ca8; } .pulse i:nth-child(3) { animation-delay:1.6s; border-color:#ff9d2e; }
+  .pulse span { animation:bob 2.4s ease-in-out infinite; }
+
+  /* själva kortet: färgen följer pennnivån */
+  .hero { color:#fff; border-radius:28px; padding:20px; margin:16px 0 12px; position:relative; overflow:hidden;
+          box-shadow:var(--shadow); animation:pop .4s cubic-bezier(.2,1.4,.4,1) both; }
+  .hero::after { content:""; position:absolute; right:-50px; top:-60px; width:190px; height:190px; border-radius:50%; background:rgba(255,255,255,.16); }
+  .lv1 { background:linear-gradient(135deg,#4f8cff,#7c5cff); } .lv2 { background:linear-gradient(135deg,#0fb98a,#0c9fd1); }
+  .lv3 { background:linear-gradient(135deg,#b25cff,#ff5ca8); } .lv4 { background:linear-gradient(135deg,#ffb300,#ff6f1e); }
+  .lv5 { background:linear-gradient(135deg,#ff5c5c,#ffb300,#22c58b,#4f8cff,#b25cff); }
+  .hero-top { display:flex; justify-content:space-between; gap:8px; position:relative; z-index:1; }
+  .chip { background:rgba(255,255,255,.24); padding:4px 12px; border-radius:999px; font-size:14px; font-weight:800; }
+  .pen { font-size:32px; font-weight:900; letter-spacing:-.5px; margin:14px 0 10px; position:relative; z-index:1; }
+  .slots { display:flex; flex-wrap:wrap; gap:4px; font-size:26px; line-height:1; position:relative; z-index:1; }
+  .slots span { filter:grayscale(1) brightness(2.2); opacity:.38; }
+  .slots .full { filter:none; opacity:1; animation:pop .4s cubic-bezier(.2,1.6,.4,1) both; }
+  .bar { height:16px; border-radius:8px; background:rgba(255,255,255,.3); overflow:hidden; }
+  .bar i { display:block; height:100%; background:#fff; border-radius:8px; }
+  .goal { margin:10px 0 0; position:relative; z-index:1; }
+
+  .tiles { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin:12px 0 16px; }
+  .tile { background:var(--card); border-radius:22px; padding:12px 6px; text-align:center; box-shadow:var(--shadow);
+          font-size:14px; animation:pop .4s cubic-bezier(.2,1.4,.4,1) both; }
+  .tile:nth-child(2) { animation-delay:.06s; } .tile:nth-child(3) { animation-delay:.12s; }
+  .tile em { display:grid; place-items:center; width:44px; height:44px; margin:0 auto 4px; border-radius:50%; font-style:normal; font-size:22px; }
+  .tile:nth-child(1) em { background:rgba(255,190,0,.22); } .tile:nth-child(2) em { background:rgba(255,92,168,.2); } .tile:nth-child(3) em { background:rgba(79,140,255,.2); }
+  .tile b { display:block; font-size:40px; font-weight:900; line-height:1.05; }
+  .tile .row { justify-content:center; margin-top:10px; gap:6px; flex-wrap:nowrap; }
+  .tile button { padding:8px 12px; }
+  .still .hero, .still .tile, .still .slots .full { animation:none; }
+  .banner { display:inline-block; background:var(--ok); color:#fff; padding:8px 16px; border-radius:999px; margin-top:12px;
+            animation:pop .4s cubic-bezier(.2,1.6,.4,1) both; }
+  .note { display:inline-block; background:var(--card); padding:8px 16px; border-radius:999px; margin-top:12px; box-shadow:var(--shadow); }
+  .again { background:var(--accent); color:#fff; padding:12px 16px; border-radius:18px; animation:bob 1.2s ease-in-out infinite; }
+  table { width:100%; border-collapse:collapse; }
+  th, td { text-align:left; padding:8px 6px; border-bottom:2px solid var(--line); }
+  .n { text-align:right; font-variant-numeric:tabular-nums; }
+  #msg { position:fixed; left:50%; bottom:20px; transform:translateX(-50%); background:var(--ink); color:var(--bg);
+         padding:12px 18px; border-radius:18px; display:none; max-width:90vw; z-index:5; box-shadow:var(--shadow); }
+  .confetti { position:fixed; top:-40px; font-size:26px; pointer-events:none; z-index:9; animation:fall linear forwards; }
+  @keyframes pop { from { transform:scale(.88); opacity:0; } to { transform:scale(1); opacity:1; } }
+  @keyframes ring { 0% { transform:scale(.45); opacity:.9; } 100% { transform:scale(1.15); opacity:0; } }
+  @keyframes bob { 0%,100% { transform:translateY(0); } 50% { transform:translateY(-6px); } }
+  @keyframes fall { to { transform:translateY(110vh) rotate(540deg); opacity:.9; } }
+  @media (prefers-reduced-motion: reduce) { * { animation:none !important; transition:none !important; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Blippkort</h1>
+  <button id="nfcBtn" class="primary">Starta NFC</button>
+  <button id="adminBtn">Admin</button>
+</header>
+<main id="app"></main>
+<div id="msg"></div>
+
+<script>
+"use strict";
+/* Saldot ligger på själva kortet. Sidan har ingen server och skickar ingenting någonstans.
+   Admin-mobilen sparar hemlig nyckel, pennnivåer och en namnlös kopia per kortnummer lokalt. */
+const MIME = "application/x-bk";
+const DEFAULT_LEVELS = [{ name: "Blyertspenna", cost: 0 }, { name: "Stiftpenna", cost: 5 },
+                        { name: "Gelpenna", cost: 10 }, { name: "Guldpenna", cost: 15 }];
+const MODES = [["view", "Visa / ändra"], ["s+1", "+1 ⭐"], ["e-1", "−1 🧽"], ["p-1", "−1 ✏️"],
+               ["e+1", "+1 🧽"], ["p+1", "+1 ✏️"], ["new", "Nya kort"]];
+const $ = (s) => document.querySelector(s);
+const app = $("#app");
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const load = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } };
+const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch { toast("Kunde inte spara i mobilen"); } };
+
+let secret = load("bk_key", null);        // satt = den här mobilen är admin
+let levels = load("bk_levels", DEFAULT_LEVELS);
+let cfg = { se: 2, sp: 4, ve: 2, vp: 1, ...load("bk_cfg", {}) };   // start-sudd, start-pennor, värde per sudd/penna i ⭐
+let bonus = load("bk_bonus", {});         // kortnummer -> [{ a: antal, t: text }], läggs på vid nästa blipp
+let backup = load("bk_cards", {});        // kortnummer -> senast kända läge
+let mode = "view";
+let view = { name: "wait" };
+let pending = null;                       // { uid, state, text }: väntar på att kortet blippas igen
+let reader = null, busy = false, clearTimer = null;
+
+function toast(text) {
+  const m = $("#msg"); m.textContent = text; m.style.display = "block";
+  clearTimeout(toast.t); toast.t = setTimeout(() => (m.style.display = "none"), 3500);
+}
+const buzz = (ok) => { try { navigator.vibrate(ok ? 60 : [80, 60, 80]); } catch {} };
+const normUid = (s) => String(s || "").replace(/[^0-9a-z]/gi, "").toUpperCase();
+
+// ---------- kortets innehåll ----------
+async function signature(uid, st) {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const msg = [uid, st.n, st.s, st.e, st.p, st.l, st.g, st.c].join("|");
+  const mac = new Uint8Array(await crypto.subtle.sign("HMAC", key, enc.encode(msg))).slice(0, 9);
+  return btoa(String.fromCharCode(...mac));
+}
+const nextCost = (level) => (levels[level] ? levels[level].cost : 0);   // level är 1-baserad; levels[level] = nästa nivå
+const clean = (st) => ({ v: 1, n: st.n, s: st.s, e: st.e, p: st.p, l: st.l, g: nextCost(st.l), w: worth(st), c: st.c });
+const worth = (st) => st.s + st.e * cfg.ve + st.p * cfg.vp;
+
+function parseCard(message) {
+  for (const r of message.records) {
+    if (r.recordType === "mime" && r.mediaType === MIME) {
+      try {
+        const o = JSON.parse(new TextDecoder().decode(r.data));
+        if ([o.n, o.s, o.e, o.p, o.l, o.c].every(Number.isInteger)) return o;
+      } catch {}
+    }
+  }
+  return null;
+}
+
+async function writeCard(uid, st) {
+  const out = clean({ ...st, c: st.c + 1 });
+  out.h = await signature(uid, out);
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 6000);
+  try {
+    await reader.write({ records: [{ recordType: "mime", mediaType: MIME,
+      data: new TextEncoder().encode(JSON.stringify(out)) }] }, { signal: ctl.signal });
+  } finally { clearTimeout(timer); }
+  backup[out.n] = { uid, s: out.s, e: out.e, p: out.p, l: out.l, c: out.c, ts: Date.now() };
+  save("bk_cards", backup);
+  return out;
+}
+
+// ---------- ett blipp ----------
+async function onTap(serial, message) {
+  if (busy) return;
+  busy = true;
+  try { await handleTap(normUid(serial), parseCard(message)); }
+  catch (e) { buzz(false); toast(e.name === "AbortError" ? "Hann inte skriva. Håll kortet stilla och blippa igen."
+                                                        : "Det gick inte: håll kortet stilla och blippa igen."); }
+  finally { busy = false; }
+}
+
+async function handleTap(uid, card) {
+  if (!uid) return toast("Kortet saknar ID");
+
+  if (pending) {                                   // andra blippet: skriv det som väntar
+    if (uid !== pending.uid) { buzz(false); return toast("Det är inte samma kort. Blippa rätt kort."); }
+    const before = backup[pending.state.n];
+    const st = await writeCard(uid, pending.state);
+    pending = null; buzz(true);
+    return show({ name: "card", uid, st, saved: true, party: !!before && st.l > before.l });
+  }
+
+  if (!secret) {                                   // elevläge: bara visa
+    return show(card ? { name: "card", uid, st: card } : { name: "blank", uid });
+  }
+
+  if (!card) {                                     // tomt kort i adminläge
+    if (mode !== "new") return show({ name: "blank", uid });
+    const n = nextNumber();
+    const st = await writeCard(uid, { n, s: 0, e: cfg.se, p: cfg.sp, l: 1, c: 0 });
+    buzz(true);
+    return show({ name: "card", uid, st, saved: true, created: true });
+  }
+
+  const valid = card.h === await signature(uid, card);
+  const known = backup[card.n];
+  if (!valid) return show({ name: "bad", uid, card, reason: "sig" });
+  if (known && known.uid !== uid) return show({ name: "bad", uid, card, reason: "dup" });
+  if (known && known.c > card.c) return show({ name: "bad", uid, card, reason: "old" });
+  if (!known || known.c < card.c) {                // kortet ändrat av annan admin-mobil med samma nyckel
+    backup[card.n] = { uid, s: card.s, e: card.e, p: card.p, l: card.l, c: card.c, ts: Date.now() };
+    save("bk_cards", backup);
+  }
+
+  const gifts = bonus[card.n] || [];             // bonusar som läraren loggat sedan sist
+  const extra = gifts.reduce((sum, g) => sum + g.a, 0);
+  const why = gifts.map((g) => g.t).filter(Boolean).join(", ");
+  const st = { ...card, s: card.s + extra };
+  let note = extra ? `🎁 Bonus +${extra} ⭐${why ? ": " + why : ""}` : "", changed = extra > 0;
+
+  const quick = /^([sep])([+-]1)$/.exec(mode);
+  if (quick) {
+    if (st[quick[1]] + Number(quick[2]) < 0) { buzz(false); note = ("Saldot är redan 0, inget ändrat. " + note).trim(); }
+    else { st[quick[1]] += Number(quick[2]); changed = true; }
+  }
+  if (changed) {
+    const done = await writeCard(uid, st);
+    if (extra) { delete bonus[card.n]; save("bk_bonus", bonus); }
+    buzz(true);
+    return show({ name: "card", uid, st: done, saved: true, note, party: extra > 0 });
+  }
+  if (quick) return show({ name: "card", uid, st: card, note });
+  if (mode === "new") return show({ name: "card", uid, st: card, note: "Kortet är redan klart (nr " + card.n + ")." });
+  show({ name: "edit", uid, st: { ...card }, orig: card });
+}
+
+function nextNumber() { let n = 1; while (backup[n]) n++; return n; }
+
+// ---------- vyer ----------
+function show(v) {
+  view = v; clearTimeout(clearTimer);
+  $("#adminBtn").textContent = secret ? "Meny" : "Admin";
+  app.innerHTML = modeBar() + ({ wait: vWait, card: vCard, blank: vBlank, bad: vBad, edit: vEdit,
+                                 menu: vMenu, list: vList, levels: vLevels, bonus: vBonus }[v.name])(v);
+  if (v.name === "card" || v.name === "blank") clearTimer = setTimeout(() => show({ name: "wait" }), 20000);
+}
+
+function modeBar() {
+  if (!secret || ["menu", "list", "levels", "bonus"].includes(view.name)) return "";
+  return `<div class="modes">${MODES.map(([id, label]) =>
+    `<button class="${id === mode ? "on" : ""}" onclick="setMode('${id}')">${label}</button>`).join("")}</div>`;
+}
+function setMode(id) { mode = id; pending = null; show({ name: "wait" }); }
+
+function progress(st) {
+  const cost = st.g, name = levels[st.l] ? levels[st.l].name : "nästa penna";
+  if (!cost) return `<p class="goal">🏆 Du har den bästa pennan!</p>`;
+  const missing = Math.max(0, cost - st.s);
+  const meter = cost <= 12
+    ? `<div class="slots" style="font-size:${cost <= 6 ? 30 : cost <= 9 ? 25 : 21}px">${Array.from({ length: cost }, (_, i) => `<span class="${i < st.s ? "full" : ""}">⭐</span>`).join("")}</div>`
+    : `<div class="bar"><i style="width:${Math.min(100, Math.round(100 * st.s / cost))}%"></i></div>`;
+  return meter + `<p class="goal">${missing ? `<b>${missing}</b> kvar till <b>${esc(name)}</b>`
+    : `🎉 Du kan uppgradera till <b>${esc(name)}</b>!`}</p>`;
+}
+function hero(st) {
+  return `<div class="hero lv${Math.min(st.l, 5)}"><div class="hero-top"><span class="chip">Kort nr ${st.n}</span>
+    <span class="chip">Nivå ${st.l}</span></div><div class="pen">${levelName(st.l)}</div>${progress(st)}</div>`;
+}
+function party() {
+  if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  for (let i = 0; i < 16; i++) {
+    const s = document.createElement("span");
+    s.className = "confetti"; s.textContent = ["⭐", "🎉", "✏️", "🌟", "🎈"][i % 5];
+    s.style.left = Math.random() * 96 + "vw"; s.style.animationDuration = 1.6 + Math.random() * 1.6 + "s";
+    s.style.animationDelay = Math.random() * 0.5 + "s";
+    document.body.appendChild(s); setTimeout(() => s.remove(), 4000);
+  }
+}
+const levelName = (l) => esc(levels[l - 1] ? levels[l - 1].name : "Nivå " + l);
+
+function vWait() {
+  const hint = !("NDEFReader" in window) ? "Den här webbläsaren kan inte läsa NFC. Använd Chrome på en Android-mobil."
+    : !reader ? "Tryck på Starta NFC först."
+    : mode === "new" ? "Blippa tomma kort ett i taget. Nästa får nummer " + nextNumber() + "."
+    : mode !== "view" ? "Blippa kort ett i taget. Varje blipp ändrar saldot direkt."
+    : "Håll kortet mot mobilens baksida.";
+  return `<div class="panel center wait"><div class="pulse"><i></i><i></i><i></i><span>🪪</span></div>
+    <h2>Blippa ditt kort!</h2><p class="muted">${hint}</p></div>`;
+}
+
+const statTile = (value, icon, label, extra = "") =>
+  `<div class="tile"><em>${icon}</em><b>${value}</b>${label}${extra}</div>`;
+
+function vCard({ st, saved, created, note }) {
+  if (view.party || (st.g && st.s >= st.g && (!secret || st.s === st.g))) setTimeout(party, 150);
+  return `${saved ? `<div class="banner">✓ ${created ? "Nytt kort skapat" : "Sparat på kortet"}</div>` : ""}
+    ${note ? `<div class="note">${esc(note)}</div>` : ""}
+    ${hero(st)}
+    <div class="tiles">${statTile(st.s, "⭐", "stickers")}${statTile(st.e, "🧽", "sudd")}${statTile(st.p, "✏️", "pennor")}</div>
+    <p style="margin:0 0 16px"><span class="note" style="margin:0">💰 Värde om du byter in allt: <b>${Number.isInteger(st.w) ? st.w : worth(st)} ⭐</b></span></p>
+    <button onclick="show({name:'wait'})">Klar</button>`;
+}
+
+function vBlank() {
+  if (!secret) return `<div class="panel center"><div class="big">❓</div><h2>Tomt kort</h2>
+    <p class="muted">Kortet är inte iordninggjort ännu.</p></div>`;
+  const lost = Object.keys(backup).map(Number).sort((a, b) => a - b);
+  return `<div class="panel"><h3>Tomt kort</h3>
+    <p><button class="primary" onclick="prepare(${nextNumber()}, false)">Gör till nytt kort nr ${nextNumber()}</button></p>
+    ${lost.length ? `<p class="muted">eller ersätt ett borttappat kort (saldot hämtas från kopian i mobilen):</p>
+    <div class="row"><select id="lostSel">${lost.map((n) => `<option value="${n}">Kort nr ${n}</option>`).join("")}</select>
+    <button onclick="prepare(Number(document.querySelector('#lostSel').value), true)">Ersätt</button></div>` : ""}</div>
+    <button onclick="show({name:'wait'})">Avbryt</button>`;
+}
+
+function vBad({ uid, card, reason }) {
+  const b = backup[card.n];
+  const why = { sig: "Kortets innehåll är inte signerat av den här mobilen. Det kan ha ändrats utifrån, eller så är det skrivet med en annan nyckel.",
+                dup: "Det finns redan ett annat kort med nummer " + card.n + ". Det här ser ut som en kopia eller ett ersatt, gammalt kort.",
+                old: "Kortet har äldre data än vad mobilen senast sparade. Någon kan ha lagt tillbaka en gammal kopia." }[reason];
+  return `<div class="panel warn"><h3>⚠️ Kortet stämmer inte</h3><p>${why}</p>
+    <p class="muted">På kortet: nr ${card.n}, ⭐ ${card.s}, 🧽 ${card.e}, ✏️ ${card.p}</p>
+    ${b && b.uid === uid ? `<p>Mobilens kopia av kort nr ${card.n}: ⭐ ${b.s}, 🧽 ${b.e}, ✏️ ${b.p}, ${levelName(b.l)}</p>
+      <button class="primary" onclick="prepare(${card.n}, true)">Återställ kortet från kopian</button>` : ""}</div>
+    <button onclick="show({name:'wait'})">Tillbaka</button>`;
+}
+
+function vEdit({ st, orig }) {
+  const tile = (k, icon, label) => statTile(st[k], icon, label, `<div class="row">
+    <button onclick="bump('${k}',-1)" ${st[k] < 1 ? "disabled" : ""}>−1</button>
+    <button class="primary" onclick="bump('${k}',1)">+1</button></div>`);
+  const cost = nextCost(st.l), changed = ["s", "e", "p", "l"].some((k) => st[k] !== orig[k]);
+  return `<div class="still">${hero({ ...st, g: cost })}
+    <div class="tiles">${tile("s", "⭐", "stickers")}${tile("e", "🧽", "sudd")}${tile("p", "✏️", "pennor")}</div></div>
+    <div class="row" style="margin-bottom:16px">
+      ${cfg.ve ? `<button onclick="trade('e',${cfg.ve})" ${st.e < 1 ? "disabled" : ""}>Byt in 1 🧽 → +${cfg.ve} ⭐</button>` : ""}
+      ${cfg.vp ? `<button onclick="trade('p',${cfg.vp})" ${st.p < 1 ? "disabled" : ""}>Byt in 1 ✏️ → +${cfg.vp} ⭐</button>` : ""}</div>
+    ${cost ? `<p><button onclick="upgrade()" ${st.s < cost ? "disabled" : ""}>⬆️ Uppgradera till ${esc(levels[st.l].name)} (−${cost} ⭐)</button></p>` : ""}
+    ${pending ? `<p class="again">👉 Blippa samma kort igen för att spara.</p>`
+      : `<p><button class="primary" onclick="commit()" ${changed ? "" : "disabled"}>Spara på kortet</button></p>`}
+    <button onclick="pending=null;show({name:'wait'})">${changed ? "Avbryt" : "Klar"}</button>`;
+}
+function bump(k, d) { view.st[k] = Math.max(0, view.st[k] + d); pending = null; show(view); }
+function upgrade() { const c = nextCost(view.st.l); if (view.st.s >= c) { view.st.s -= c; view.st.l += 1; } pending = null; show(view); }
+function trade(k, value) { if (view.st[k] > 0) { view.st[k] -= 1; view.st.s += value; } pending = null; show(view); }
+function commit() { pending = { uid: view.uid, state: view.st }; show(view); }
+
+function prepare(n, fromBackup) {      // tomt/ogiltigt kort: bestäm innehållet, skriv vid nästa blipp
+  const b = backup[n];
+  const state = fromBackup && b ? { n, s: b.s, e: b.e, p: b.p, l: b.l, c: b.c } : { n, s: 0, e: cfg.se, p: cfg.sp, l: 1, c: 0 };
+  pending = { uid: view.uid, state };
+  app.innerHTML = `<div class="panel center"><div class="big">👉</div><h2>Blippa kortet igen</h2>
+    <p class="muted">Då skrivs kort nr ${n} till kortet.</p></div>
+    <button onclick="pending=null;show({name:'wait'})">Avbryt</button>`;
+}
+
+// ---------- admin ----------
+function vMenu() {
+  return `<div class="panel"><h3>Admin</h3><div class="row">
+    <button class="primary" onclick="show({name:'bonus'})">🎁 Ge bonus</button>
+    <button onclick="show({name:'list'})">Alla kort</button>
+    <button onclick="show({name:'levels'})">Nivåer och regler</button>
+    <button onclick="exportBackup()">Spara kopia som fil</button>
+    <button onclick="document.querySelector('#imp').click()">Läs in kopia</button>
+    <input id="imp" type="file" accept="application/json" hidden onchange="importBackup(this)">
+    <button class="danger" onclick="logout()">Ta bort admin från den här mobilen</button></div>
+    <p class="muted">Kopian innehåller bara kortnummer och saldon, inga namn. Nyckeln behövs om du byter mobil: skriv upp den.</p></div>
+    <button onclick="show({name:'wait'})">Tillbaka</button>`;
+}
+function vList() {
+  const rows = Object.entries(backup).sort((a, b) => a[0] - b[0]);
+  return `<div class="panel"><h3>Alla kort (${rows.length})</h3><table>
+    <tr><th>Nr</th><th>Penna</th><th class="n">⭐</th><th class="n">🧽</th><th class="n">✏️</th><th class="n">🎁</th><th class="n">Senast</th></tr>
+    ${rows.map(([n, b]) => `<tr><td>${n}</td><td>${levelName(b.l)}</td><td class="n">${b.s}</td><td class="n">${b.e}</td>
+      <td class="n">${b.p}</td><td class="n">${(bonus[n] || []).reduce((s, g) => s + g.a, 0) || ""}</td><td class="n muted">${new Date(b.ts).toLocaleDateString("sv-SE")}</td></tr>`).join("")
+      || `<tr><td colspan="7" class="muted">Inga kort ännu. Välj Nya kort och blippa tomma kort.</td></tr>`}</table></div>
+    <button onclick="show({name:'menu'})">Tillbaka</button>`;
+}
+function vBonus() {
+  const nums = Object.keys(backup).map(Number).sort((a, b) => a - b);
+  const waiting = Object.entries(bonus).sort((a, b) => a[0] - b[0]);
+  return `<div class="panel"><h3>🎁 Ge bonus</h3>
+    <p class="muted">Bonusen hamnar på kortet nästa gång det blippas mot den här mobilen.</p>
+    ${nums.length ? `<form onsubmit="event.preventDefault();addBonus(this)"><div class="row">
+      <select name="n">${nums.map((n) => `<option value="${n}">Kort nr ${n}</option>`).join("")}</select>
+      <select name="a">${[1, 2, 3, 4, 5].map((a) => `<option value="${a}">+${a} ⭐</option>`).join("")}</select></div>
+      <p><input name="t" placeholder="För vad? (valfritt, inga namn)" maxlength="40" style="width:100%"></p>
+      <button class="primary">Lägg till bonus</button></form>` : `<p>Gör i ordning kort först.</p>`}</div>
+    ${waiting.length ? `<div class="panel"><h3>Väntar på blipp</h3><table>${waiting.map(([n, list]) =>
+      `<tr><td>Kort nr ${n}</td><td>+${list.reduce((s, g) => s + g.a, 0)} ⭐ <span class="muted">${esc(list.map((g) => g.t).filter(Boolean).join(", "))}</span></td>
+       <td class="n"><button class="danger" onclick="dropBonus(${n})">Ta bort</button></td></tr>`).join("")}</table></div>` : ""}
+    <button onclick="show({name:'wait'})">Klar</button>`;
+}
+function addBonus(f) {
+  const n = Number(f.n.value);
+  (bonus[n] = bonus[n] || []).push({ a: Number(f.a.value), t: f.t.value.trim() });
+  save("bk_bonus", bonus); toast("Bonus loggad för kort nr " + n); show(view);
+}
+function dropBonus(n) { delete bonus[n]; save("bk_bonus", bonus); show(view); }
+
+function vLevels() {
+  return `<div class="panel"><h3>Pennnivåer</h3>
+    <p class="muted">Kostnaden är antalet stickers som dras vid uppgradering. Ändringar syns på ett kort nästa gång det sparas.</p>
+    <form onsubmit="event.preventDefault();saveLevels(this)"><table>
+    ${levels.map((l, i) => `<tr><td>${i + 1}</td><td><input name="name" value="${esc(l.name)}" required size="14"></td>
+      <td>${i ? `<input name="cost" type="number" min="1" value="${l.cost}" style="width:80px" required>` : `<input name="cost" type="hidden" value="0">start`}</td></tr>`).join("")}
+    </table>
+    <h3 style="margin-top:20px">Start och inbyte</h3>
+    <p class="muted">Nya kort laddas med startantalet. Sparade sudd och pennor kan bytas in mot stickers.</p>
+    <table>
+    <tr><td>🧽 Sudd på nya kort</td><td><input name="se" type="number" min="0" max="99" value="${cfg.se}" style="width:80px" required></td></tr>
+    <tr><td>✏️ Pennor på nya kort</td><td><input name="sp" type="number" min="0" max="99" value="${cfg.sp}" style="width:80px" required></td></tr>
+    <tr><td>1 sparat sudd är värt (⭐)</td><td><input name="ve" type="number" min="0" max="99" value="${cfg.ve}" style="width:80px" required></td></tr>
+    <tr><td>1 sparad penna är värd (⭐)</td><td><input name="vp" type="number" min="0" max="99" value="${cfg.vp}" style="width:80px" required></td></tr>
+    </table><div class="row" style="margin-top:12px">
+    <button type="button" onclick="levels=[...readLevels(this.form),{name:'',cost:10}];show(view)">+ Ny nivå</button>
+    ${levels.length > 1 ? `<button type="button" class="danger" onclick="levels=readLevels(this.form).slice(0,-1);show(view)">Ta bort sista</button>` : ""}
+    <button class="primary">Spara</button></div></form></div>
+    <button onclick="levels=load('bk_levels',DEFAULT_LEVELS);show({name:'menu'})">Tillbaka</button>`;
+}
+const readLevels = (f) => [...f.querySelectorAll('[name="name"]')].map((el, i) =>
+  ({ name: el.value.trim(), cost: Math.max(0, Math.round(Number(f.querySelectorAll('[name="cost"]')[i].value)) || 0) }));
+function saveLevels(f) {
+  for (const k of ["se", "sp", "ve", "vp"]) cfg[k] = Math.max(0, Math.round(Number(f[k].value)) || 0);
+  save("bk_cfg", cfg); levels = readLevels(f); save("bk_levels", levels); toast("Sparat"); show({ name: "menu" });
+}
+
+function exportBackup() {
+  const blob = new Blob([JSON.stringify({ levels, cfg, bonus, cards: backup }, null, 1)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = "blippkort-kopia-" + new Date().toISOString().slice(0, 10) + ".json";
+  a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+async function importBackup(input) {
+  try {
+    const data = JSON.parse(await input.files[0].text());
+    if (typeof data.cards !== "object" || !Array.isArray(data.levels)) throw 0;
+    if (!confirm("Ersätta mobilens kopia med filen?")) return;
+    backup = data.cards; levels = data.levels; cfg = { ...cfg, ...data.cfg }; bonus = data.bonus || {};
+    save("bk_cards", backup); save("bk_levels", levels); save("bk_cfg", cfg); save("bk_bonus", bonus);
+    toast("Kopian är inläst"); show({ name: "list" });
+  } catch { toast("Filen gick inte att läsa"); }
+}
+function logout() {
+  if (!confirm("Ta bort nyckeln och kopian från den här mobilen? Korten påverkas inte.")) return;
+  secret = null; backup = {}; bonus = {}; mode = "view"; pending = null;
+  try { localStorage.removeItem("bk_key"); localStorage.removeItem("bk_cards"); localStorage.removeItem("bk_bonus"); } catch {}
+  show({ name: "wait" });
+}
+
+$("#adminBtn").onclick = () => {
+  if (secret) return show({ name: "menu" });
+  const given = prompt("Hemlig nyckel för admin (minst 8 tecken).\nFörsta gången: hitta på en och skriv upp den.");
+  if (!given) return;
+  if (given.trim().length < 8) return toast("Nyckeln måste vara minst 8 tecken");
+  secret = given.trim(); save("bk_key", secret); show({ name: "wait" });
+};
+
+$("#nfcBtn").onclick = async () => {
+  if (!("NDEFReader" in window)) return toast("Använd Chrome på en Android-mobil.");
+  try {
+    reader = new NDEFReader();
+    await reader.scan();
+    reader.onreading = (e) => onTap(e.serialNumber, e.message);
+    reader.onreadingerror = () => toast("Kunde inte läsa kortet, försök igen");
+    $("#nfcBtn").hidden = true; show(view);
+  } catch (e) { reader = null; toast("NFC kunde inte startas. Är NFC påslaget i mobilen?"); }
+};
+
+show({ name: "wait" });
+</script>
+</body>
+</html>

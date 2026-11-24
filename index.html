@@ -78,7 +78,28 @@
   .banner { display:inline-block; background:var(--ok); color:#fff; padding:8px 16px; border-radius:999px; margin-top:12px;
             animation:pop .4s cubic-bezier(.2,1.6,.4,1) both; }
   .note { display:inline-block; max-width:100%; border-radius:18px !important; background:var(--card); padding:8px 16px; border-radius:999px; margin-top:12px; box-shadow:var(--shadow); }
-  .again { background:var(--accent); color:#fff; padding:12px 16px; border-radius:18px; animation:bob 1.2s ease-in-out infinite; }
+  .tile { position:relative; }
+  .tile.hot { outline:3px solid var(--accent); }
+  .badge { position:absolute; top:-10px; right:-6px; background:var(--accent); color:#fff; font-weight:900; font-size:15px;
+           padding:3px 10px; border-radius:999px; box-shadow:0 3px 0 var(--accent-d); }
+  .spacer { height:170px; }
+  .confirm { position:fixed; left:50%; bottom:14px; width:min(608px, calc(100vw - 24px)); margin-left:calc(min(608px, 100vw - 24px) / -2);
+             z-index:4; display:flex; align-items:center; gap:14px; padding:16px; border-radius:30px; color:#fff;
+             background:linear-gradient(135deg,#6c4cff,#ff5ca8); box-shadow:0 14px 34px rgba(80,40,160,.45); transform-origin:50% 100%; }
+  .confirm.grow { animation:grow .55s cubic-bezier(.2,1.5,.4,1) both; }
+  .confirm.puff { animation:puff .3s ease-out both; }
+  .confirm-icon { position:relative; flex:none; width:74px; height:74px; display:grid; place-items:center; font-size:38px;
+                  background:rgba(255,255,255,.2); border-radius:50%; }
+  .confirm-icon i { position:absolute; inset:0; border-radius:50%; border:3px solid #fff; opacity:0; animation:ring 1.6s ease-out infinite; }
+  .confirm-icon i:nth-child(2) { animation-delay:.8s; }
+  .confirm-icon span { animation:bob 1.2s ease-in-out infinite; }
+  .confirm-text { flex:1; min-width:0; display:flex; flex-direction:column; gap:2px; }
+  .confirm-text b { font-size:20px; font-weight:900; line-height:1.15; }
+  .confirm-text span { font-size:18px; font-weight:800; }
+  .confirm-text small { opacity:.85; font-weight:600; }
+  .confirm button { flex:none; background:rgba(255,255,255,.22); color:#fff; box-shadow:none; padding:10px 14px; }
+  @keyframes grow { from { transform:scale(.15); opacity:0; } to { transform:scale(1); opacity:1; } }
+  @keyframes puff { 0% { transform:scale(1); } 45% { transform:scale(1.05); } 100% { transform:scale(1); } }
   table { width:100%; border-collapse:collapse; }
   th, td { text-align:left; padding:8px 6px; border-bottom:2px solid var(--line); }
   .n { text-align:right; font-variant-numeric:tabular-nums; }
@@ -264,7 +285,7 @@ function renumber() {
   const raw = prompt("Nytt nummer för kortet (nu nr " + view.st.n + "):");
   if (raw === null) return;
   const n = askNumber(raw, view.uid);
-  if (n) { view.st.n = n; pending = null; show(view); }
+  if (n) { view.st.n = n; touched(); }
 }
 
 // ---------- vyer ----------
@@ -379,26 +400,47 @@ function vBad({ uid, card, reason }) {
     <button onclick="show({name:'wait'})">Tillbaka</button>`;
 }
 
+function editDelta(st, orig) {            // t.ex. ["+2 ⭐", "−1 ✏️"]
+  const sign = (d) => (d > 0 ? "+" : "−") + Math.abs(d);
+  const out = [["s", "⭐"], ["e", "🧽"], ["p", "✏️"]].filter(([k]) => st[k] !== orig[k]).map(([k, icon]) => `${sign(st[k] - orig[k])} ${icon}`);
+  if (st.l !== orig.l) out.push("ny penna: " + levelName(st.l));
+  if (st.n !== orig.n) out.push(`nr ${orig.n} → ${st.n}`);
+  return out;
+}
 function vEdit({ st, orig }) {
-  const tile = (k, icon, label) => statTile(st[k], icon, label, `<div class="row">
+  const sign = (d) => (d > 0 ? "+" : "−") + Math.abs(d);
+  const tile = (k, icon, label) => `<div class="tile ${st[k] !== orig[k] ? "hot" : ""}">
+    ${st[k] !== orig[k] ? `<span class="badge">${sign(st[k] - orig[k])}</span>` : ""}<em>${icon}</em><b>${st[k]}</b>${label}<div class="row">
     <button onclick="bump('${k}',-1)" ${st[k] < 1 ? "disabled" : ""}>−1</button>
-    <button class="primary" onclick="bump('${k}',1)">+1</button></div>`);
-  const cost = nextCost(st.l), changed = ["n", "s", "e", "p", "l"].some((k) => st[k] !== orig[k]);
+    <button class="primary" onclick="bump('${k}',1)">+1</button></div></div>`;
+  const cost = nextCost(st.l), delta = editDelta(st, orig);
+  const first = pending && !view.grown;            // bubblan växer fram första gången, sedan bara en liten puff
+  if (pending) view.grown = true;
   return `<div class="still">${hero({ ...st, g: cost })}
     <div class="tiles">${tile("s", "⭐", "stickers")}${tile("e", "🧽", "sudd")}${tile("p", "✏️", "pennor")}</div></div>
     <div class="row" style="margin-bottom:16px">
       ${cfg.ve ? `<button onclick="trade('e',${cfg.ve})" ${st.e < 1 ? "disabled" : ""}>Byt in 1 🧽 → +${cfg.ve} ⭐</button>` : ""}
       ${cfg.vp ? `<button onclick="trade('p',${cfg.vp})" ${st.p < 1 ? "disabled" : ""}>Byt in 1 ✏️ → +${cfg.vp} ⭐</button>` : ""}</div>
     ${cost ? `<p><button onclick="upgrade()" ${st.s < cost ? "disabled" : ""}>⬆️ Uppgradera till ${esc(levels[st.l].name)} (−${cost} ⭐)</button></p>` : ""}
-    ${pending ? `<p class="again">👉 Blippa samma kort igen för att spara.</p>`
-      : `<p><button class="primary" onclick="commit()" ${changed ? "" : "disabled"}>Spara på kortet</button></p>`}
-    <div class="row"><button onclick="pending=null;show({name:'wait'})">${changed ? "Avbryt" : "Klar"}</button>
-      <button onclick="renumber()">Byt kortnummer</button></div>`;
+    <div class="row"><button onclick="pending=null;show({name:'wait'})">${pending ? "Avbryt" : "Klar"}</button>
+      <button onclick="renumber()">Byt kortnummer</button></div>
+    ${pending ? `<div class="spacer"></div><div class="confirm ${first ? "grow" : "puff"}">
+      <div class="confirm-icon"><i></i><i></i><span>📲</span></div>
+      <div class="confirm-text"><b>Blippa kortet för att bekräfta</b><span>${delta.join(" · ")}</span>
+        <small>Inget är sparat förrän du blippar.</small></div>
+      <button onclick="undoEdit()">Ångra</button></div>` : ""}`;
 }
-function bump(k, d) { view.st[k] = Math.max(0, view.st[k] + d); pending = null; show(view); }
-function upgrade() { const c = nextCost(view.st.l); if (view.st.s >= c) { view.st.s -= c; view.st.l += 1; } pending = null; show(view); }
-function trade(k, value) { if (view.st[k] > 0) { view.st[k] -= 1; view.st.s += value; } pending = null; show(view); }
-function commit() { pending = { uid: view.uid, state: view.st, oldN: view.orig.n }; show(view); }
+// Varje ändring väntar direkt på ett blipp: ingen extra spara-knapp att glömma.
+function touched() {
+  const changed = ["n", "s", "e", "p", "l"].some((k) => view.st[k] !== view.orig[k]);
+  pending = changed ? { uid: view.uid, state: view.st, oldN: view.orig.n } : null;
+  if (!changed) view.grown = false;
+  show(view);
+}
+function bump(k, d) { view.st[k] = Math.max(0, view.st[k] + d); touched(); }
+function upgrade() { const c = nextCost(view.st.l); if (view.st.s >= c) { view.st.s -= c; view.st.l += 1; } touched(); }
+function trade(k, value) { if (view.st[k] > 0) { view.st[k] -= 1; view.st.s += value; } touched(); }
+function undoEdit() { view.st = { ...view.orig }; touched(); }
 
 function prepare(n, fromBackup) {      // tomt/ogiltigt kort: bestäm innehållet, skriv vid nästa blipp
   const b = backup[n];

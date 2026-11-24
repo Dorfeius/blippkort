@@ -77,7 +77,7 @@
   .still .hero, .still .tile, .still .slots .full { animation:none; }
   .banner { display:inline-block; background:var(--ok); color:#fff; padding:8px 16px; border-radius:999px; margin-top:12px;
             animation:pop .4s cubic-bezier(.2,1.6,.4,1) both; }
-  .note { display:inline-block; background:var(--card); padding:8px 16px; border-radius:999px; margin-top:12px; box-shadow:var(--shadow); }
+  .note { display:inline-block; max-width:100%; border-radius:18px !important; background:var(--card); padding:8px 16px; border-radius:999px; margin-top:12px; box-shadow:var(--shadow); }
   .again { background:var(--accent); color:#fff; padding:12px 16px; border-radius:18px; animation:bob 1.2s ease-in-out infinite; }
   table { width:100%; border-collapse:collapse; }
   th, td { text-align:left; padding:8px 6px; border-bottom:2px solid var(--line); }
@@ -177,8 +177,7 @@ async function onTap(serial, message) {
   if (busy) return;
   busy = true; armModeReset();
   try { await handleTap(normUid(serial), parseCard(message)); }
-  catch (e) { buzz(false); toast(e.name === "AbortError" ? "Hann inte skriva. Håll kortet stilla och blippa igen."
-                                                        : "Det gick inte: håll kortet stilla och blippa igen."); }
+  catch (e) { buzz(false); show({ name: "fail" }); }
   finally { busy = false; }
 }
 
@@ -202,6 +201,15 @@ async function handleTap(uid, card) {
   }
 
   if (!card) {                                     // tomt kort i adminläge
+    // Känner mobilen igen taggen har en skrivning avbrutits och tömt kortet: lägg tillbaka kopian direkt.
+    const lostN = Object.keys(backup).find((k) => backup[k].uid === uid);
+    if (lostN) {
+      const b = backup[lostN];
+      const st = await writeCard(uid, { n: Number(lostN), s: b.s, e: b.e, p: b.p, l: b.l, c: b.c });
+      buzz(true);
+      return show({ name: "card", uid, st, saved: true,
+        note: "Kortet hade tappat sin data (avbruten skrivning) och är återställt från kopian. Gör om din senaste ändring." });
+    }
     if (mode !== "new") return show({ name: "blank", uid });
     const n = upcoming(); wantN = backup[n + 1] ? null : n + 1;
     const st = await writeCard(uid, { n, s: 0, e: cfg.se, p: cfg.sp, l: 1, c: 0 });
@@ -263,7 +271,7 @@ function renumber() {
 function show(v) {
   view = v; clearTimeout(clearTimer);
   $("#adminBtn").textContent = secret ? "Meny" : "Admin";
-  app.innerHTML = modeBar() + ({ wait: vWait, card: vCard, blank: vBlank, bad: vBad, edit: vEdit,
+  app.innerHTML = modeBar() + ({ wait: vWait, card: vCard, blank: vBlank, bad: vBad, edit: vEdit, fail: vFail,
                                  menu: vMenu, list: vList, levels: vLevels, bonus: vBonus }[v.name])(v);
   if (v.name === "card" || v.name === "blank") clearTimer = setTimeout(() => show({ name: "wait" }), 20000);
 }
@@ -318,7 +326,7 @@ function vWait() {
     : !reader ? "Tryck på Starta NFC först."
     : mode === "new" ? `Blippa tomma kort ett i taget. Nästa får nummer
       <input type="number" min="1" max="999" value="${upcoming()}" style="width:84px;padding:6px 10px" onchange="setWant(this.value)">`
-    : mode !== "view" ? "Blippa kort ett i taget. Varje blipp ändrar saldot direkt. Går tillbaka till Läs saldo efter en stund."
+    : mode !== "view" ? "Blippa kort ett i taget. Håll kvar kortet tills mobilen vibrerar. Går tillbaka till Läs saldo efter en stund."
     : "Håll kortet mot mobilens baksida.";
   return `<div class="panel center wait"><div class="pulse"><i></i><i></i><i></i><span>🪪</span></div>
     <h2>Blippa ditt kort!</h2><p class="muted">${hint}</p></div>`;
@@ -336,6 +344,14 @@ function vCard({ st, saved, created, note }) {
     <p style="margin:0 0 16px"><span class="note" style="margin:0">💰 Värde om du byter in allt: <b>${Number.isInteger(st.w) ? st.w : worth(st)} ⭐</b></span></p>
     <div class="row"><button onclick="show({name:'wait'})">Klar</button>
       ${secret && view.uid ? `<button onclick="openEdit()">Ändra kortet</button>` : ""}</div>`;
+}
+
+function vFail() {
+  return `<div class="panel warn center"><div class="big">✋</div><h2>Det blev inte sparat</h2>
+    <p>Kortet togs bort för tidigt eller låg inte still.</p>
+    <p><b>Blippa kortet igen och håll kvar det tills mobilen vibrerar och ✓ visas.</b></p>
+    <p class="muted">${pending ? "Din ändring väntar och sparas vid nästa blipp."
+      : "Skulle kortet ha blivit tomt återställs det automatiskt från kopian i mobilen."}</p></div>`;
 }
 
 function vBlank() {

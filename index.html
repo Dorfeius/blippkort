@@ -187,8 +187,12 @@ async function handleTap(uid, card) {
 
   if (pending) {                                   // andra blippet: skriv det som väntar
     if (uid !== pending.uid) { buzz(false); return toast("Det är inte samma kort. Blippa rätt kort."); }
-    const before = backup[pending.state.n];
-    const st = await writeCard(uid, pending.state);
+    const { state, oldN } = pending, before = backup[state.n];
+    const st = await writeCard(uid, state);
+    if (oldN && oldN !== st.n) {                   // kortet har fått nytt nummer: flytta kopia och väntande bonus
+      if (backup[oldN] && backup[oldN].uid === uid) { delete backup[oldN]; save("bk_cards", backup); }
+      if (bonus[oldN]) { bonus[st.n] = [...(bonus[st.n] || []), ...bonus[oldN]]; delete bonus[oldN]; save("bk_bonus", bonus); }
+    }
     pending = null; buzz(true);
     return show({ name: "card", uid, st, saved: true, party: !!before && st.l > before.l });
   }
@@ -199,7 +203,7 @@ async function handleTap(uid, card) {
 
   if (!card) {                                     // tomt kort i adminläge
     if (mode !== "new") return show({ name: "blank", uid });
-    const n = nextNumber();
+    const n = upcoming(); wantN = backup[n + 1] ? null : n + 1;
     const st = await writeCard(uid, { n, s: 0, e: cfg.se, p: cfg.sp, l: 1, c: 0 });
     buzz(true);
     return show({ name: "card", uid, st, saved: true, created: true });
@@ -238,6 +242,22 @@ async function handleTap(uid, card) {
 }
 
 function nextNumber() { let n = 1; while (backup[n]) n++; return n; }
+let wantN = null;                         // nummer som admin valt för nästa nya kort
+const upcoming = () => (wantN && !backup[wantN] ? wantN : nextNumber());
+function askNumber(raw, uid) {            // giltigt och ledigt kortnummer, annars null
+  const n = Math.round(Number(raw));
+  if (!(n >= 1 && n <= 999)) { toast("Skriv ett nummer mellan 1 och 999"); return null; }
+  if (backup[n] && backup[n].uid !== uid) { toast("Nummer " + n + " används redan av ett annat kort"); return null; }
+  return n;
+}
+function setWant(raw) { const n = askNumber(raw); if (n) wantN = n; show(view); }
+function prepareNew() { const n = askNumber(document.querySelector("#newN").value, view.uid); if (n) prepare(n, false); }
+function renumber() {
+  const raw = prompt("Nytt nummer för kortet (nu nr " + view.st.n + "):");
+  if (raw === null) return;
+  const n = askNumber(raw, view.uid);
+  if (n) { view.st.n = n; pending = null; show(view); }
+}
 
 // ---------- vyer ----------
 function show(v) {
@@ -284,7 +304,8 @@ const levelName = (l) => esc(levels[l - 1] ? levels[l - 1].name : "Nivå " + l);
 function vWait() {
   const hint = !("NDEFReader" in window) ? "Den här webbläsaren kan inte läsa NFC. Använd Chrome på en Android-mobil."
     : !reader ? "Tryck på Starta NFC först."
-    : mode === "new" ? "Blippa tomma kort ett i taget. Nästa får nummer " + nextNumber() + "."
+    : mode === "new" ? `Blippa tomma kort ett i taget. Nästa får nummer
+      <input type="number" min="1" max="999" value="${upcoming()}" style="width:84px;padding:6px 10px" onchange="setWant(this.value)">`
     : mode !== "view" ? "Blippa kort ett i taget. Varje blipp ändrar saldot direkt."
     : "Håll kortet mot mobilens baksida.";
   return `<div class="panel center wait"><div class="pulse"><i></i><i></i><i></i><span>🪪</span></div>
@@ -309,7 +330,8 @@ function vBlank() {
     <p class="muted">Kortet är inte iordninggjort ännu.</p></div>`;
   const lost = Object.keys(backup).map(Number).sort((a, b) => a - b);
   return `<div class="panel"><h3>Tomt kort</h3>
-    <p><button class="primary" onclick="prepare(${nextNumber()}, false)">Gör till nytt kort nr ${nextNumber()}</button></p>
+    <div class="row" style="margin-bottom:14px">Kort nr <input id="newN" type="number" min="1" max="999" value="${upcoming()}" style="width:84px">
+      <button class="primary" onclick="prepareNew()">Gör till nytt kort</button></div>
     ${lost.length ? `<p class="muted">eller ersätt ett borttappat kort (saldot hämtas från kopian i mobilen):</p>
     <div class="row"><select id="lostSel">${lost.map((n) => `<option value="${n}">Kort nr ${n}</option>`).join("")}</select>
     <button onclick="prepare(Number(document.querySelector('#lostSel').value), true)">Ersätt</button></div>` : ""}</div>
@@ -332,7 +354,7 @@ function vEdit({ st, orig }) {
   const tile = (k, icon, label) => statTile(st[k], icon, label, `<div class="row">
     <button onclick="bump('${k}',-1)" ${st[k] < 1 ? "disabled" : ""}>−1</button>
     <button class="primary" onclick="bump('${k}',1)">+1</button></div>`);
-  const cost = nextCost(st.l), changed = ["s", "e", "p", "l"].some((k) => st[k] !== orig[k]);
+  const cost = nextCost(st.l), changed = ["n", "s", "e", "p", "l"].some((k) => st[k] !== orig[k]);
   return `<div class="still">${hero({ ...st, g: cost })}
     <div class="tiles">${tile("s", "⭐", "stickers")}${tile("e", "🧽", "sudd")}${tile("p", "✏️", "pennor")}</div></div>
     <div class="row" style="margin-bottom:16px">
@@ -341,12 +363,13 @@ function vEdit({ st, orig }) {
     ${cost ? `<p><button onclick="upgrade()" ${st.s < cost ? "disabled" : ""}>⬆️ Uppgradera till ${esc(levels[st.l].name)} (−${cost} ⭐)</button></p>` : ""}
     ${pending ? `<p class="again">👉 Blippa samma kort igen för att spara.</p>`
       : `<p><button class="primary" onclick="commit()" ${changed ? "" : "disabled"}>Spara på kortet</button></p>`}
-    <button onclick="pending=null;show({name:'wait'})">${changed ? "Avbryt" : "Klar"}</button>`;
+    <div class="row"><button onclick="pending=null;show({name:'wait'})">${changed ? "Avbryt" : "Klar"}</button>
+      <button onclick="renumber()">Byt kortnummer</button></div>`;
 }
 function bump(k, d) { view.st[k] = Math.max(0, view.st[k] + d); pending = null; show(view); }
 function upgrade() { const c = nextCost(view.st.l); if (view.st.s >= c) { view.st.s -= c; view.st.l += 1; } pending = null; show(view); }
 function trade(k, value) { if (view.st[k] > 0) { view.st[k] -= 1; view.st.s += value; } pending = null; show(view); }
-function commit() { pending = { uid: view.uid, state: view.st }; show(view); }
+function commit() { pending = { uid: view.uid, state: view.st, oldN: view.orig.n }; show(view); }
 
 function prepare(n, fromBackup) {      // tomt/ogiltigt kort: bestäm innehållet, skriv vid nästa blipp
   const b = backup[n];

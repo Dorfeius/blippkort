@@ -122,12 +122,18 @@
   @keyframes ring { 0% { transform:scale(.45); opacity:.9; } 100% { transform:scale(1.15); opacity:0; } }
   @keyframes bob { 0%,100% { transform:translateY(0); } 50% { transform:translateY(-6px); } }
   @keyframes fall { to { transform:translateY(110vh) rotate(540deg); opacity:.9; } }
+  /* stor skärm (t.ex. Chromebook): förstora allt så att det syns på håll */
+  @media (min-width: 900px) { header, main { zoom:1.35; } }
+  @media (min-width: 1400px) { header, main { zoom:1.6; } }
+  #fsBtn.on { background:var(--accent); color:#fff; box-shadow:0 4px 0 var(--accent-d); }
   @media (prefers-reduced-motion: reduce) { *:not(.count i) { animation:none !important; transition:none !important; } }
 </style>
 </head>
 <body>
 <header>
   <h1>Blippkort</h1>
+  <button id="fsBtn" onclick="toggleKiosk()" aria-label="Helskärm" title="Helskärm" style="padding:10px 12px;line-height:0">
+    <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path id="fsIcon" d="M3 7V3h4M13 3h4v4M17 13v4h-4M7 17H3v-4"/></svg></button>
   <button id="cloud" hidden onclick="if(secret)show({name:'sync'})" style="padding:8px 12px"></button>
   <button id="nfcBtn" class="primary">Starta NFC</button>
   <button id="adminBtn">Admin</button>
@@ -744,6 +750,39 @@ $("#nfcBtn").onclick = async () => {
 };
 
 if (!("NDEFReader" in window) && secret) $("#nfcBtn").hidden = true;
+// ---------- helskärm + håll skärmen vaken ----------
+let kiosk = false, wakeLock = null;
+async function keepAwake() {              // låset släpps av webbläsaren när sidan döljs, så det tas om när den syns igen
+  if (!kiosk || !("wakeLock" in navigator) || document.visibilityState !== "visible") return false;
+  if (wakeLock && wakeLock.released === false) return true;      // redan vaken
+  try { wakeLock = await navigator.wakeLock.request("screen"); return true; } catch { return false; }
+}
+function paintKiosk() {
+  $("#fsBtn").classList.toggle("on", kiosk);
+  $("#fsIcon").setAttribute("d", kiosk ? "M7 3v4H3M17 7h-4V3M13 17v-4h4M3 13h4v4" : "M3 7V3h4M13 3h4v4M17 13v4h-4M7 17H3v-4");
+}
+async function toggleKiosk() {
+  if (kiosk) {
+    kiosk = false; paintKiosk();
+    try { if (wakeLock) await wakeLock.release(); } catch {} wakeLock = null;
+    try { if (document.fullscreenElement) await document.exitFullscreen(); } catch {}
+    return;
+  }
+  kiosk = true; paintKiosk();
+  let full = false;
+  try { await document.documentElement.requestFullscreen({ navigationUI: "hide" }); full = true; } catch {}
+  const awake = await keepAwake();
+  toast(full && awake ? "Helskärm på. Skärmen hålls vaken."
+    : awake ? "Skärmen hålls vaken. Helskärm stöds inte i den här webbläsaren."
+    : full ? "Helskärm på, men den här webbläsaren kan inte hålla skärmen vaken."
+    : "Den här webbläsaren stöder varken helskärm eller vaken skärm.");
+  if (!full && !awake) { kiosk = false; paintKiosk(); }
+}
+document.addEventListener("fullscreenchange", () => {   // lämnar man helskärm (t.ex. med bakåt eller Esc) släpps också skärmen
+  if (!document.fullscreenElement && kiosk && document.fullscreenEnabled) toggleKiosk();
+});
+document.addEventListener("visibilitychange", keepAwake);
+
 show({ name: "wait" });
 if (gh) { setCloud("", syncInfo); sync(); }
 </script>

@@ -749,7 +749,7 @@ $("#nfcBtn").onclick = async () => {
   } catch (e) { reader = null; toast("NFC kunde inte startas. Är NFC påslaget i mobilen?"); }
 };
 
-if (!("NDEFReader" in window) && secret) $("#nfcBtn").hidden = true;
+if (!("NDEFReader" in window)) $("#nfcBtn").hidden = true;      // ingen NFC här: visa inte en knapp som inte kan fungera
 // ---------- helskärm + håll skärmen vaken ----------
 let kiosk = false, wakeLock = null;
 async function keepAwake() {              // låset släpps av webbläsaren när sidan döljs, så det tas om när den syns igen

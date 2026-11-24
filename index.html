@@ -617,24 +617,33 @@ function mergeData(r) {                    // slå ihop registret med det som fi
   save("bk_levels", levels); save("bk_cfg", cfg); save("bk_cfgts", cfgTs);
   quietSave = false;
 }
-const ghCall = (method, body) => fetch(`https://api.github.com/repos/${gh.repo}/contents/${GH_FILE}`, { method, body, cache: "no-store",
-  headers: { Authorization: "Bearer " + gh.token, Accept: "application/vnd.github+json" } });
+let known = null;                          // senast hämtade version: { etag, sha, text }
+const ghCall = (method, body, etag) => fetch(`https://api.github.com/repos/${gh.repo}/contents/${GH_FILE}`, { method, body, cache: "no-store",
+  headers: { Authorization: "Bearer " + gh.token, Accept: "application/vnd.github+json", ...(etag ? { "If-None-Match": etag } : {}) } });
 async function sync() {
   if (!gh || !secret) return;
   if (syncing) { syncAgain = true; return; }
-  syncing = true; setCloud("busy", "Synkar…");
+  syncing = true;
   const before = JSON.stringify(snapshot());
   try {
     for (let i = 0; ; i++) {
-      const res = await ghCall("GET");
+      // "Har något ändrats sedan sist?" Oförändrat svar (304) är pyttelitet och räknas inte mot GitHubs gräns.
+      const res = await ghCall("GET", undefined, known && known.etag);
       let sha, remote = "";
-      if (res.ok) { const j = await res.json(); sha = j.sha; remote = b64d(j.content); mergeData(JSON.parse(remote)); }
+      if (res.status === 304 && known) { sha = known.sha; remote = known.text; }
+      else if (res.ok) {
+        const j = await res.json(); sha = j.sha; remote = b64d(j.content);
+        known = { etag: res.headers.get("ETag"), sha, text: remote };
+        mergeData(JSON.parse(remote));
+      }
+      else if ((res.status === 403 || res.status === 429) && res.headers.get("x-ratelimit-remaining") === "0")
+        throw new Error("GitHub tar en paus för många frågor. Försöker igen om en stund.");
       else if (res.status === 401 || res.status === 403) throw new Error("GitHub godkände inte åtkomstnyckeln");
       else if (res.status !== 404) throw new Error("GitHub svarade " + res.status);
       const text = JSON.stringify(snapshot());
       if (text === remote) break;
       const put = await ghCall("PUT", JSON.stringify({ message: "Blippkort: uppdatera registret", content: b64e(text), sha }));
-      if (put.ok) break;
+      if (put.ok) { known = null; break; }     // nästa fråga hämtar den nya versionen och dess märkning
       if (put.status === 404) throw new Error("Hittar inte förrådet. Kontrollera namnet och att nyckeln har skrivrätt.");
       if (put.status === 401 || put.status === 403) throw new Error("Åtkomstnyckeln saknar skrivrätt (Contents: Read and write)");
       if (i >= 3 || (put.status !== 409 && put.status !== 422)) throw new Error("GitHub svarade " + put.status);
@@ -649,7 +658,12 @@ async function sync() {
   }
 }
 function queueSync() { if (!gh) return; clearTimeout(syncTimer); syncTimer = setTimeout(sync, 1200); }
-setInterval(() => { if (document.visibilityState === "visible") sync(); }, 30000);
+// Under skoldagen (08:20–15:15) kollar sidan registret var 5:e sekund, annars var 30:e.
+const schoolHours = () => { const d = new Date(), m = d.getHours() * 60 + d.getMinutes(); return m >= 8 * 60 + 20 && m <= 15 * 60 + 15; };
+(function tick() {
+  if (document.visibilityState === "visible") sync();
+  setTimeout(tick, schoolHours() ? 5000 : 30000);
+})();
 addEventListener("online", sync);
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") sync(); });
 
@@ -669,12 +683,12 @@ function vSync() {
 function saveSync(f) {
   const repo = f.repo.value.trim().replace(/^https:\/\/github\.com\//, "").replace(/\/$/, "");
   if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return toast("Skriv förrådet som konto/namn");
-  gh = { repo, token: f.token.value.trim(), who: f.who.value.trim() };
+  gh = { repo, token: f.token.value.trim(), who: f.who.value.trim() }; known = null;
   save("bk_gh", gh); show(view); sync();
 }
 function unlinkSync() {
   if (!confirm("Koppla från registret på den här enheten? Filen på GitHub ligger kvar.")) return;
-  gh = null; try { localStorage.removeItem("bk_gh"); } catch {} setCloud("", ""); show(view);
+  gh = null; known = null; try { localStorage.removeItem("bk_gh"); } catch {} setCloud("", ""); show(view);
 }
 
 function vLevels() {

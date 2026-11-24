@@ -128,6 +128,7 @@
 <body>
 <header>
   <h1>Blippkort</h1>
+  <button id="cloud" hidden onclick="if(secret)show({name:'sync'})" style="padding:8px 12px"></button>
   <button id="nfcBtn" class="primary">Starta NFC</button>
   <button id="adminBtn">Admin</button>
 </header>
@@ -149,12 +150,23 @@ const app = $("#app");
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const load = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } };
-const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch { toast("Kunde inte spara i mobilen"); } };
+const SYNCED = ["bk_cards", "bk_bonus", "bk_done", "bk_log", "bk_levels", "bk_cfg"];   // det som också sparas i registret på GitHub
+let quietSave = false;
+const save = (k, v) => {
+  try { localStorage.setItem(k, JSON.stringify(v)); } catch { toast("Kunde inte spara i mobilen"); }
+  if (!quietSave && SYNCED.includes(k)) queueSync();
+};
+const rid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 
 let secret = load("bk_key", null);        // satt = den här mobilen är admin
 let levels = load("bk_levels", DEFAULT_LEVELS);
 let cfg = { se: 2, sp: 4, ve: 2, vp: 1, ...load("bk_cfg", {}) };   // start-sudd, start-pennor, värde per sudd/penna i ⭐
-let bonus = load("bk_bonus", {});         // kortnummer -> [{ a: antal, t: text }], läggs på vid nästa blipp
+let bonus = load("bk_bonus", {});         // väntande ändringar: kortnummer -> [{ id, k: fält, a: antal, t: text }], läggs på vid nästa blipp
+for (const list of Object.values(bonus)) for (const g of list) { g.id = g.id || rid(); g.k = g.k || "s"; }
+let done = load("bk_done", []);           // id:n på väntande ändringar som redan förts över eller tagits bort
+let log = load("bk_log", []);             // händelser: [{ id, ts, n, t, by }]
+let cfgTs = load("bk_cfgts", 0);
+let gh = load("bk_gh", null);             // { repo, token, who }: koppling till registret på GitHub
 let backup = load("bk_cards", {});        // kortnummer -> senast kända läge
 let adding = false;                       // "lägg till nya kort": skriver bara på tomma, okända kort
 let view = { name: "wait" };
@@ -201,6 +213,10 @@ async function writeCard(uid, st) {
     await reader.write({ records: [{ recordType: "mime", mediaType: MIME,
       data: new TextEncoder().encode(JSON.stringify(out)) }] }, { signal: ctl.signal });
   } finally { clearTimeout(timer); }
+  const prev = backup[out.n] && backup[out.n].uid === uid ? backup[out.n] : null;
+  const parts = prev ? ["s", "e", "p"].filter((k) => out[k] !== prev[k]).map((k) => `${signed(out[k] - prev[k])} ${ICON[k]}`) : ["nytt kort"];
+  if (prev && out.l !== prev.l) parts.push("penna: " + (levels[out.l - 1] ? levels[out.l - 1].name : out.l));
+  addLog(out.n, parts.join(", ") || "skrivet på nytt");
   backup[out.n] = { uid, s: out.s, e: out.e, p: out.p, l: out.l, c: out.c, ts: Date.now() };
   save("bk_cards", backup);
   return out;
@@ -273,31 +289,41 @@ async function handleTap(uid, card) {
   const valid = card.h === await signature(uid, card);
   const known = backup[card.n];
   const bad = !valid ? "sig" : known && known.uid !== uid ? "dup" : known && known.c > card.c ? "old" : "";
-  if (bad) { disarm(); return show({ name: "bad", uid, card, reason: bad }); }
+  if (bad) {
+    addLog(card.n, "⚠️ kortet stämde inte: " + { sig: "ändrat utifrån eller fel nyckel", dup: "kopia av ett annat kort", old: "gammalt saldo tillbakalagt" }[bad]);
+    disarm(); return show({ name: "bad", uid, card, reason: bad });
+  }
   if (!known || known.c < card.c) {                // kortet ändrat av annan admin-mobil med samma nyckel
     backup[card.n] = { uid, s: card.s, e: card.e, p: card.p, l: card.l, c: card.c, ts: Date.now() };
     save("bk_cards", backup);
   }
 
-  const gifts = bonus[card.n] || [];               // bonusar som läraren loggat sedan sist
-  const extra = gifts.reduce((sum, g) => sum + g.a, 0);
+  const gifts = (bonus[card.n] || []).filter((g) => !done.includes(g.id));   // ändringar från registret sedan sist
+  const st = { ...card }, sums = { s: 0, e: 0, p: 0 };
+  for (const g of gifts) sums[g.k] += g.a;
+  for (const k of ["s", "e", "p"]) st[k] = Math.max(0, st[k] + sums[k]);
+  const extra = gifts.length > 0;
+  const what = ["s", "e", "p"].filter((k) => st[k] !== card[k]).map((k) => `${signed(st[k] - card[k])} ${ICON[k]}`).join(", ");
   const why = gifts.map((g) => g.t).filter(Boolean).join(", ");
-  const st = { ...card, s: card.s + extra };
-  let note = extra ? `🎁 Bonus +${extra} ⭐${why ? ": " + why : ""}` : "";
+  let note = extra ? `${sums.s > 0 && !sums.e && !sums.p ? "🎁 Bonus" : "📝 Från registret"}: ${what || "ingen ändring"}${why ? " (" + why + ")" : ""}` : "";
   const did = applyQuick(st, quick);
   if (quick && !did) { buzz(false); note = ("Saldot är redan 0, inget ändrat. " + note).trim(); }
   if (adding) note = ("Kortet är redan klart (nr " + card.n + "). " + note).trim();
 
   if (extra || did) {
-    const done = await writeCard(uid, st);
-    if (extra) { delete bonus[card.n]; save("bk_bonus", bonus); }
+    const written = await writeCard(uid, st);
+    if (extra) { done = [...done, ...gifts.map((g) => g.id)].slice(-400); delete bonus[card.n]; save("bk_done", done); save("bk_bonus", bonus); }
     disarm(); buzz(true);
-    return opened(uid, done, { saved: true, note, party: extra > 0, again: did ? quick : null });
+    return opened(uid, written, { saved: true, note, party: sums.s > 0, again: did ? quick : null });
   }
   disarm();
   opened(uid, card, { note });                     // standard: läs bara av kortet
 }
 
+function addLog(n, t) {
+  log.push({ id: rid(), ts: Date.now(), n, t, by: (gh && gh.who) || "" });
+  log = log.slice(-300); save("bk_log", log);
+}
 function nextNumber() { let n = 1; while (backup[n]) n++; return n; }
 let wantN = null;                         // nummer som admin valt för nästa nya kort
 const upcoming = () => (wantN && !backup[wantN] ? wantN : nextNumber());
@@ -323,7 +349,7 @@ function show(v) {
   view = v; clearTimeout(clearTimer);
   $("#adminBtn").textContent = secret ? "Meny" : "Admin";
   app.innerHTML = ({ wait: vWait, card: vCard, blank: vBlank, bad: vBad, edit: vEdit, fail: vFail, armed: vArmed,
-                     menu: vMenu, list: vList, levels: vLevels, bonus: vBonus }[v.name])(v);
+                     menu: vMenu, list: vList, levels: vLevels, bonus: vBonus, sync: vSync, log: vLog }[v.name])(v);
   // ett avläst kort ligger inte kvar på skärmen till nästa person
   if (["card", "blank", "bad"].includes(v.name) || (v.name === "edit" && !pending))
     clearTimer = setTimeout(() => show({ name: "wait" }), 25000);
@@ -368,6 +394,12 @@ function vWait() {
       <input type="number" min="1" max="999" value="${upcoming()}" style="width:84px;padding:6px 10px" onchange="setWant(this.value)"></p>
     <p class="muted">Kort som redan är klara läses bara av.</p>
     <button class="primary" onclick="stopAdding()">Klar med nya kort</button></div>`;
+  if (secret && !("NDEFReader" in window)) return `<div class="panel center"><div class="big">📋</div><h2>Registret</h2>
+    <p class="muted">Den här enheten kan inte blippa kort (det kräver Chrome på Android). Här ser du alla kort och kan lägga in ändringar.
+    De förs över till kortet nästa gång det blippas mot adminmobilen.</p>
+    <div class="row" style="justify-content:center"><button class="primary" onclick="show({name:'list'})">Alla kort</button>
+    <button onclick="show({name:'bonus'})">Ändra ett kort</button><button onclick="show({name:'log'})">Händelser</button></div>
+    ${gh ? "" : `<p style="margin-bottom:0"><button onclick="show({name:'sync'})">☁️ Koppla till registret först</button></p>`}</div>`;
   const hint = !("NDEFReader" in window) ? "Den här webbläsaren kan inte läsa NFC. Använd Chrome på en Android-mobil."
     : !reader ? "Tryck på Starta NFC först." : "Håll kortet mot mobilens baksida.";
   return `<div class="panel center wait"><div class="pulse"><i></i><i></i><i></i><span>🪪</span></div>
@@ -487,49 +519,157 @@ function prepare(n, fromBackup) {      // tomt/ogiltigt kort: bestäm innehålle
 }
 
 // ---------- admin ----------
+const queueText = (list) => ["s", "e", "p"].map((k) => [k, list.filter((g) => g.k === k).reduce((s, g) => s + g.a, 0)])
+  .filter(([, a]) => a).map(([k, a]) => `${signed(a)} ${ICON[k]}`).join(" ");
 function vMenu() {
   return `<div class="panel"><h3>Admin</h3><div class="row">
-    <button class="primary" onclick="show({name:'bonus'})">🎁 Ge bonus</button>
-    <button onclick="startAdding()">➕ Lägg till nya kort</button>
+    <button class="primary" onclick="show({name:'bonus'})">🎁 Bonus och ändringar</button>
+    ${"NDEFReader" in window ? `<button onclick="startAdding()">➕ Lägg till nya kort</button>` : ""}
     <button onclick="show({name:'list'})">Alla kort</button>
+    <button onclick="show({name:'log'})">Händelser</button>
     <button onclick="show({name:'levels'})">Nivåer och regler</button>
+    <button onclick="show({name:'sync'})">☁️ Register på GitHub</button>
     <button onclick="exportBackup()">Spara kopia som fil</button>
     <button onclick="document.querySelector('#imp').click()">Läs in kopia</button>
     <input id="imp" type="file" accept="application/json" hidden onchange="importBackup(this)">
-    <button class="danger" onclick="logout()">Ta bort admin från den här mobilen</button></div>
-    <p class="muted">Kopian innehåller bara kortnummer och saldon, inga namn. Nyckeln behövs om du byter mobil: skriv upp den.</p></div>
+    <button class="danger" onclick="logout()">Ta bort admin från den här enheten</button></div>
+    <p class="muted">Registret innehåller bara kortnummer och saldon, inga namn. Nyckeln behövs om du byter mobil: skriv upp den.</p></div>
     <button onclick="show({name:'wait'})">Tillbaka</button>`;
 }
 function vList() {
   const rows = Object.entries(backup).sort((a, b) => a[0] - b[0]);
-  return `<div class="panel"><h3>Alla kort (${rows.length})</h3><table>
-    <tr><th>Nr</th><th>Penna</th><th class="n">⭐</th><th class="n">🧽</th><th class="n">✏️</th><th class="n">🎁</th><th class="n">Senast</th></tr>
-    ${rows.map(([n, b]) => `<tr><td>${n}</td><td>${levelName(b.l)}</td><td class="n">${b.s}</td><td class="n">${b.e}</td>
-      <td class="n">${b.p}</td><td class="n">${(bonus[n] || []).reduce((s, g) => s + g.a, 0) || ""}</td><td class="n muted">${new Date(b.ts).toLocaleDateString("sv-SE")}</td></tr>`).join("")
-      || `<tr><td colspan="7" class="muted">Inga kort ännu. Välj Nya kort och blippa tomma kort.</td></tr>`}</table></div>
-    <button onclick="show({name:'menu'})">Tillbaka</button>`;
+  return `<div class="panel"><h3>Alla kort (${rows.length})</h3><p class="muted">Tryck på ett kort för att lägga in en ändring.</p><table>
+    <tr><th>Nr</th><th>Penna</th><th class="n">⭐</th><th class="n">🧽</th><th class="n">✏️</th><th class="n">Väntar</th><th class="n">Senast</th></tr>
+    ${rows.map(([n, b]) => `<tr onclick="show({name:'bonus',n:${n}})" style="cursor:pointer"><td><b>${n}</b></td><td>${levelName(b.l)}</td><td class="n">${b.s}</td><td class="n">${b.e}</td>
+      <td class="n">${b.p}</td><td class="n">${queueText(bonus[n] || [])}</td><td class="n muted">${new Date(b.ts).toLocaleDateString("sv-SE")}</td></tr>`).join("")
+      || `<tr><td colspan="7" class="muted">Inga kort ännu.</td></tr>`}</table></div>
+    <button onclick="show({name:'${"NDEFReader" in window ? "menu" : "wait"}'})">Tillbaka</button>`;
 }
-function vBonus() {
+function vBonus({ n: chosen }) {
   const nums = Object.keys(backup).map(Number).sort((a, b) => a - b);
-  const waiting = Object.entries(bonus).sort((a, b) => a[0] - b[0]);
-  return `<div class="panel"><h3>🎁 Ge bonus</h3>
-    <p class="muted">Bonusen hamnar på kortet nästa gång det blippas mot den här mobilen.</p>
+  const waiting = Object.entries(bonus).filter(([, l]) => l.length).sort((a, b) => a[0] - b[0]);
+  const b = backup[chosen];
+  return `<div class="panel"><h3>🎁 Bonus och ändringar</h3>
+    <p class="muted">Ändringen hamnar på kortet nästa gång det blippas mot adminmobilen.</p>
+    ${b ? `<p>Kort nr ${chosen} har nu: <b>${b.s} ⭐ · ${b.e} 🧽 · ${b.p} ✏️</b></p>` : ""}
     ${nums.length ? `<form onsubmit="event.preventDefault();addBonus(this)"><div class="row">
-      <select name="n">${nums.map((n) => `<option value="${n}">Kort nr ${n}</option>`).join("")}</select>
-      <select name="a">${[1, 2, 3, 4, 5].map((a) => `<option value="${a}">+${a} ⭐</option>`).join("")}</select></div>
+      <select name="n" onchange="show({name:'bonus',n:Number(this.value)})">${nums.map((n) => `<option value="${n}" ${n === chosen ? "selected" : ""}>Kort nr ${n}</option>`).join("")}</select>
+      <select name="k"><option value="s">⭐ stickers</option><option value="e">🧽 sudd</option><option value="p">✏️ pennor</option></select>
+      <select name="a">${[1, 2, 3, 4, 5, -1, -2, -3, -4, -5].map((a) => `<option value="${a}">${signed(a)}</option>`).join("")}</select></div>
       <p><input name="t" placeholder="För vad? (valfritt, inga namn)" maxlength="40" style="width:100%"></p>
-      <button class="primary">Lägg till bonus</button></form>` : `<p>Gör i ordning kort först.</p>`}</div>
+      <button class="primary">Lägg till</button></form>` : `<p>Det finns inga kort i registret ännu.</p>`}</div>
     ${waiting.length ? `<div class="panel"><h3>Väntar på blipp</h3><table>${waiting.map(([n, list]) =>
-      `<tr><td>Kort nr ${n}</td><td>+${list.reduce((s, g) => s + g.a, 0)} ⭐ <span class="muted">${esc(list.map((g) => g.t).filter(Boolean).join(", "))}</span></td>
+      `<tr><td>Kort nr ${n}</td><td>${queueText(list)} <span class="muted">${esc(list.map((g) => g.t).filter(Boolean).join(", "))}</span></td>
        <td class="n"><button class="danger" onclick="dropBonus(${n})">Ta bort</button></td></tr>`).join("")}</table></div>` : ""}
-    <button onclick="show({name:'wait'})">Klar</button>`;
+    <div class="row"><button onclick="show({name:'wait'})">Klar</button><button onclick="show({name:'list'})">Alla kort</button></div>`;
 }
 function addBonus(f) {
-  const n = Number(f.n.value);
-  (bonus[n] = bonus[n] || []).push({ a: Number(f.a.value), t: f.t.value.trim() });
-  save("bk_bonus", bonus); toast("Bonus loggad för kort nr " + n); show(view);
+  const n = Number(f.n.value), a = Number(f.a.value);
+  (bonus[n] = bonus[n] || []).push({ id: rid(), k: f.k.value, a, t: f.t.value.trim(), ts: Date.now(), by: (gh && gh.who) || "" });
+  save("bk_bonus", bonus); toast(`${signed(a)} ${ICON[f.k.value]} väntar på kort nr ${n}`); show({ name: "bonus", n });
 }
-function dropBonus(n) { delete bonus[n]; save("bk_bonus", bonus); show(view); }
+function dropBonus(n) {
+  done = [...done, ...(bonus[n] || []).map((g) => g.id)].slice(-400);
+  delete bonus[n]; save("bk_done", done); save("bk_bonus", bonus); show(view);
+}
+function vLog() {
+  const rows = log.slice(-80).reverse();
+  return `<div class="panel"><h3>Händelser</h3><table>
+    ${rows.map((e) => `<tr><td class="muted" style="white-space:nowrap">${new Date(e.ts).toLocaleString("sv-SE", { dateStyle: "short", timeStyle: "short" })}</td>
+      <td><b>Kort ${e.n}</b></td><td>${esc(e.t)} <span class="muted">${esc(e.by || "")}</span></td></tr>`).join("")
+      || `<tr><td class="muted">Inget har hänt ännu.</td></tr>`}</table></div>
+    <button onclick="show({name:'${"NDEFReader" in window ? "menu" : "wait"}'})">Tillbaka</button>`;
+}
+
+// ---------- register på GitHub: en privat fil som alla adminenheter delar ----------
+const GH_FILE = "blippkort-data.json";
+let syncing = false, syncAgain = false, syncTimer = null, syncInfo = gh ? "Inte synkat ännu" : "";
+const b64e = (s) => { const u = new TextEncoder().encode(s); let o = ""; for (let i = 0; i < u.length; i += 8192) o += String.fromCharCode(...u.subarray(i, i + 8192)); return btoa(o); };
+const b64d = (s) => new TextDecoder().decode(Uint8Array.from(atob(s.replace(/\s/g, "")), (c) => c.charCodeAt(0)));
+const snapshot = () => ({ v: 1, cards: backup, queue: bonus, done, log, levels, cfg, cfgTs });
+function setCloud(state, info) {
+  syncInfo = info; const el = $("#cloud"); if (!el) return;
+  el.hidden = !gh; el.textContent = { ok: "☁️✓", busy: "☁️…", err: "☁️⚠️" }[state] || "☁️"; el.title = info;
+  const s = $("#syncInfo"); if (s) s.textContent = info;
+}
+function mergeData(r) {                    // slå ihop registret med det som finns i enheten
+  done = [...new Set([...(r.done || []), ...done])].slice(-400);
+  const cards = { ...(r.cards || {}) };
+  for (const [n, c] of Object.entries(backup)) if (!cards[n] || c.c >= cards[n].c) cards[n] = c;
+  const byUid = {};                        // ett kort som bytt nummer ska inte finnas kvar under det gamla
+  for (const [n, c] of Object.entries(cards)) if (!byUid[c.uid] || c.c > cards[byUid[c.uid]].c) byUid[c.uid] = n;
+  backup = Object.fromEntries(Object.entries(cards).filter(([n, c]) => byUid[c.uid] === n));
+  const queue = {};
+  for (const src of [r.queue || {}, bonus]) for (const [n, list] of Object.entries(src)) for (const g of list)
+    if (!done.includes(g.id) && !(queue[n] || []).some((x) => x.id === g.id)) (queue[n] = queue[n] || []).push(g);
+  bonus = queue;
+  const seen = new Set();
+  log = [...(r.log || []), ...log].filter((e) => !seen.has(e.id) && seen.add(e.id)).sort((a, b) => a.ts - b.ts).slice(-300);
+  if ((r.cfgTs || 0) > cfgTs && Array.isArray(r.levels)) { levels = r.levels; cfg = { ...cfg, ...r.cfg }; cfgTs = r.cfgTs; }
+  quietSave = true;
+  save("bk_cards", backup); save("bk_bonus", bonus); save("bk_done", done); save("bk_log", log);
+  save("bk_levels", levels); save("bk_cfg", cfg); save("bk_cfgts", cfgTs);
+  quietSave = false;
+}
+const ghCall = (method, body) => fetch(`https://api.github.com/repos/${gh.repo}/contents/${GH_FILE}`, { method, body, cache: "no-store",
+  headers: { Authorization: "Bearer " + gh.token, Accept: "application/vnd.github+json" } });
+async function sync() {
+  if (!gh || !secret) return;
+  if (syncing) { syncAgain = true; return; }
+  syncing = true; setCloud("busy", "Synkar…");
+  const before = JSON.stringify(snapshot());
+  try {
+    for (let i = 0; ; i++) {
+      const res = await ghCall("GET");
+      let sha, remote = "";
+      if (res.ok) { const j = await res.json(); sha = j.sha; remote = b64d(j.content); mergeData(JSON.parse(remote)); }
+      else if (res.status === 401 || res.status === 403) throw new Error("GitHub godkände inte åtkomstnyckeln");
+      else if (res.status !== 404) throw new Error("GitHub svarade " + res.status);
+      const text = JSON.stringify(snapshot());
+      if (text === remote) break;
+      const put = await ghCall("PUT", JSON.stringify({ message: "Blippkort: uppdatera registret", content: b64e(text), sha }));
+      if (put.ok) break;
+      if (put.status === 404) throw new Error("Hittar inte förrådet. Kontrollera namnet och att nyckeln har skrivrätt.");
+      if (put.status === 401 || put.status === 403) throw new Error("Åtkomstnyckeln saknar skrivrätt (Contents: Read and write)");
+      if (i >= 3 || (put.status !== 409 && put.status !== 422)) throw new Error("GitHub svarade " + put.status);
+    }
+    setCloud("ok", "Synkat " + new Date().toLocaleTimeString("sv-SE", { timeStyle: "short" }));
+    if (JSON.stringify(snapshot()) !== before && ["list", "log"].includes(view.name)) show(view);
+  } catch (e) {
+    setCloud("err", e instanceof TypeError ? "Inget nät just nu. Synkar när det är tillbaka." : e.message);
+  } finally {
+    syncing = false;
+    if (syncAgain) { syncAgain = false; queueSync(); }
+  }
+}
+function queueSync() { if (!gh) return; clearTimeout(syncTimer); syncTimer = setTimeout(sync, 1200); }
+setInterval(() => { if (document.visibilityState === "visible") sync(); }, 30000);
+addEventListener("online", sync);
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") sync(); });
+
+function vSync() {
+  return `<div class="panel"><h3>☁️ Register på GitHub</h3>
+    <p class="muted">Kortens senaste saldon, väntande ändringar och händelser sparas i en fil i ett privat förråd.
+    Alla adminenheter med samma uppgifter delar registret.</p>
+    <form onsubmit="event.preventDefault();saveSync(this)">
+      <p>Privat förråd<br><input name="repo" value="${esc(gh ? gh.repo : "Dorfeius/blippkort-data")}" placeholder="konto/förråd" required style="width:100%" autocapitalize="off"></p>
+      <p>Åtkomstnyckel från GitHub<br><input name="token" type="password" value="${esc(gh ? gh.token : "")}" placeholder="github_pat_…" required style="width:100%" autocomplete="off"></p>
+      <p>Vem är du? (syns i händelser)<br><input name="who" value="${esc(gh ? gh.who || "" : "")}" placeholder="t.ex. Chris" maxlength="20" style="width:100%"></p>
+      <div class="row"><button class="primary">Spara och synka</button>
+      ${gh ? `<button type="button" onclick="sync()">Synka nu</button><button type="button" class="danger" onclick="unlinkSync()">Koppla från</button>` : ""}</div></form>
+    <p style="margin-bottom:0"><b id="syncInfo">${esc(syncInfo)}</b></p></div>
+    <button onclick="show({name:'menu'})">Tillbaka</button>`;
+}
+function saveSync(f) {
+  const repo = f.repo.value.trim().replace(/^https:\/\/github\.com\//, "").replace(/\/$/, "");
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return toast("Skriv förrådet som konto/namn");
+  gh = { repo, token: f.token.value.trim(), who: f.who.value.trim() };
+  save("bk_gh", gh); show(view); sync();
+}
+function unlinkSync() {
+  if (!confirm("Koppla från registret på den här enheten? Filen på GitHub ligger kvar.")) return;
+  gh = null; try { localStorage.removeItem("bk_gh"); } catch {} setCloud("", ""); show(view);
+}
 
 function vLevels() {
   return `<div class="panel"><h3>Pennnivåer</h3>
@@ -555,6 +695,7 @@ const readLevels = (f) => [...f.querySelectorAll('[name="name"]')].map((el, i) =
   ({ name: el.value.trim(), cost: Math.max(0, Math.round(Number(f.querySelectorAll('[name="cost"]')[i].value)) || 0) }));
 function saveLevels(f) {
   for (const k of ["se", "sp", "ve", "vp"]) cfg[k] = Math.max(0, Math.round(Number(f[k].value)) || 0);
+  cfgTs = Date.now(); save("bk_cfgts", cfgTs);
   save("bk_cfg", cfg); levels = readLevels(f); save("bk_levels", levels); toast("Sparat"); show({ name: "menu" });
 }
 
@@ -575,9 +716,9 @@ async function importBackup(input) {
   } catch { toast("Filen gick inte att läsa"); }
 }
 function logout() {
-  if (!confirm("Ta bort nyckeln och kopian från den här mobilen? Korten påverkas inte.")) return;
-  secret = null; backup = {}; bonus = {}; adding = false; disarm();
-  try { localStorage.removeItem("bk_key"); localStorage.removeItem("bk_cards"); localStorage.removeItem("bk_bonus"); } catch {}
+  if (!confirm("Ta bort nyckeln, kopian och kopplingen till registret från den här enheten? Korten och registret på GitHub påverkas inte.")) return;
+  secret = null; backup = {}; bonus = {}; done = []; log = []; gh = null; adding = false; disarm(); setCloud("", "");
+  try { for (const k of ["bk_key", "bk_cards", "bk_bonus", "bk_done", "bk_log", "bk_gh"]) localStorage.removeItem(k); } catch {}
   show({ name: "wait" });
 }
 
@@ -586,7 +727,9 @@ $("#adminBtn").onclick = () => {
   const given = prompt("Hemlig nyckel för admin (minst 8 tecken).\nFörsta gången: hitta på en och skriv upp den.");
   if (!given) return;
   if (given.trim().length < 8) return toast("Nyckeln måste vara minst 8 tecken");
-  secret = given.trim(); save("bk_key", secret); show({ name: "wait" });
+  secret = given.trim(); save("bk_key", secret);
+  if (!("NDEFReader" in window)) $("#nfcBtn").hidden = true;
+  show({ name: "wait" });
 };
 
 $("#nfcBtn").onclick = async () => {
@@ -600,7 +743,9 @@ $("#nfcBtn").onclick = async () => {
   } catch (e) { reader = null; toast("NFC kunde inte startas. Är NFC påslaget i mobilen?"); }
 };
 
+if (!("NDEFReader" in window) && secret) $("#nfcBtn").hidden = true;
 show({ name: "wait" });
+if (gh) { setCloud("", syncInfo); sync(); }
 </script>
 </body>
 </html>

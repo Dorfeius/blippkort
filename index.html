@@ -131,6 +131,7 @@
     .split { display:grid; grid-template-columns:1fr 1fr; gap:18px; align-items:start; }
   }
   .armed .what { white-space:normal; }
+  .link { color:var(--accent); font-weight:800; }
   .choices { display:grid; gap:12px; } .choices button { font-size:20px; padding:16px 18px; text-align:left; }
   #shield { position:fixed; inset:0; z-index:50; touch-action:none; -webkit-user-select:none; user-select:none;
             display:flex; align-items:flex-end; justify-content:center; padding:0 16px 28px; }
@@ -422,7 +423,7 @@ function show(v) {
   $("#adminBtn").hidden = !!(station || role); $("#lockBtn").hidden = !role;
   $("#shield").hidden = !(station && reader && v.name === "station");
   app.innerHTML = ({ role: vRole, screenSetup: vScreenSetup, screen: vScreen, station: vStation, wait: vWait, card: vCard, blank: vBlank, bad: vBad, edit: vEdit, fail: vFail, armed: vArmed,
-                     menu: vMenu, list: vList, levels: vLevels, bonus: vBonus, sync: vSync, log: vLog }[v.name])(v);
+                     menu: vMenu, share: vShare, list: vList, levels: vLevels, bonus: vBonus, sync: vSync, log: vLog }[v.name])(v);
   // ett avläst kort ligger inte kvar på skärmen till nästa person
   if (["card", "blank", "bad"].includes(v.name) || (v.name === "edit" && !pending))
     clearTimer = setTimeout(() => show({ name: "wait" }), 25000);
@@ -472,7 +473,7 @@ function vWait() {
     De förs över till kortet nästa gång det blippas mot adminmobilen.</p>
     <div class="row" style="justify-content:center"><button class="primary" onclick="show({name:'list'})">Alla kort</button>
     <button onclick="show({name:'bonus'})">Ändra ett kort</button><button onclick="show({name:'log'})">Händelser</button></div>
-    ${gh ? "" : `<p style="margin-bottom:0"><button onclick="show({name:'sync'})">☁️ Koppla till registret först</button></p>`}</div>`;
+    ${gh ? "" : `<p style="margin-bottom:0">Den här enheten är inte kopplad. Be om en länk från adminmobilen (Meny → Register → Lägg till en enhet).</p>`}</div>`;
   const hint = !("NDEFReader" in window) ? "Den här webbläsaren kan inte läsa NFC. Använd Chrome på en Android-mobil."
     : !reader ? "Tryck på Starta NFC först." : "Håll kortet mot mobilens baksida.";
   return `<div class="panel center wait"><div class="pulse"><i></i><i></i><i></i><span>🪪</span></div>
@@ -602,7 +603,7 @@ function vMenu() {
     <button onclick="show({name:'list'})">Alla kort</button>
     <button onclick="show({name:'log'})">Händelser</button>
     <button onclick="show({name:'levels'})">Nivåer och regler</button>
-    <button onclick="show({name:'sync'})">☁️ Register på GitHub</button>
+    <button onclick="show({name:'sync'})">☁️ Register${gh ? " och enheter" : ""}</button>
     <button onclick="exportBackup()">Spara kopia som fil</button>
     <button onclick="document.querySelector('#imp').click()">Läs in kopia</button>
     <input id="imp" type="file" accept="application/json" hidden onchange="importBackup(this)">
@@ -742,24 +743,82 @@ addEventListener("online", sync);
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") sync(); });
 
 function vSync() {
-  return `<div class="panel"><h3>☁️ Register på GitHub</h3>
-    <p class="muted">Kortens senaste saldon, väntande ändringar och händelser sparas i en fil i ett privat förråd.
-    Alla adminenheter med samma uppgifter delar registret.</p>
+  if (gh) return `<div class="panel"><h3>☁️ Registret är kopplat</h3>
+    <p><b id="syncInfo">${esc(syncInfo)}</b></p>
+    <p class="muted">Sparas i ${esc(gh.repo)} (privat)${gh.who ? " · du är " + esc(gh.who) : ""}.</p>
+    <div class="row"><button class="primary" onclick="show({name:'share'})">➕ Lägg till en enhet</button>
+      <button onclick="sync()">Synka nu</button><button class="danger" onclick="unlinkSync()">Koppla från</button></div></div>
+    <button onclick="show({name:'menu'})">Tillbaka</button>`;
+  return `<div class="panel"><h3>☁️ Koppla registret</h3>
+    <p class="muted">Görs en gång, på den här mobilen. Andra enheter lägger du sedan till med en länk.</p>
+    <p><b>1.</b> <a class="link" target="_blank" rel="noopener" href="https://github.com/settings/tokens/new?scopes=repo&description=Blippkort">Öppna GitHub och skapa en kod</a><br>
+      <span class="muted">Välj <b>No expiration</b> vid Expiration, tryck <b>Generate token</b> längst ner och kopiera koden som visas.</span></p>
     <form onsubmit="event.preventDefault();saveSync(this)">
-      <p>Privat förråd<br><input name="repo" value="${esc(gh ? gh.repo : "Dorfeius/blippkort-data")}" placeholder="konto/förråd" required style="width:100%" autocapitalize="off"></p>
-      <p>Åtkomstnyckel från GitHub<br><input name="token" type="password" value="${esc(gh ? gh.token : "")}" placeholder="github_pat_…" required style="width:100%" autocomplete="off"></p>
-      <p>Vem är du? (syns i händelser)<br><input name="who" value="${esc(gh ? gh.who || "" : "")}" placeholder="t.ex. Chris" maxlength="20" style="width:100%"></p>
-      <div class="row"><button class="primary">Spara och synka</button>
-      ${gh ? `<button type="button" onclick="sync()">Synka nu</button><button type="button" class="danger" onclick="unlinkSync()">Koppla från</button>` : ""}</div></form>
+      <p><b>2.</b> Klistra in koden här<br><input name="token" type="password" placeholder="ghp_…" required style="width:100%" autocomplete="off"></p>
+      <p>Ditt namn (syns i händelser)<br><input name="who" placeholder="t.ex. Chris" maxlength="20" style="width:100%"></p>
+      <button class="primary">Koppla</button></form>
     <p style="margin-bottom:0"><b id="syncInfo">${esc(syncInfo)}</b></p></div>
     <button onclick="show({name:'menu'})">Tillbaka</button>`;
 }
-function saveSync(f) {
-  const repo = f.repo.value.trim().replace(/^https:\/\/github\.com\//, "").replace(/\/$/, "");
-  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return toast("Skriv förrådet som konto/namn");
-  gh = { repo, token: f.token.value.trim(), who: f.who.value.trim() }; known = null;
-  save("bk_gh", gh); show(view); sync();
+async function saveSync(f) {              // hittar kontot, skapar det privata förrådet om det saknas, och börjar synka
+  const token = f.token.value.trim(), who = f.who.value.trim();
+  const api = (path, opt = {}) => fetch("https://api.github.com" + path, { ...opt, cache: "no-store",
+    headers: { Authorization: "Bearer " + token, Accept: "application/vnd.github+json" } });
+  setCloud("", "Kopplar…");
+  try {
+    const u = await api("/user");
+    if (!u.ok) throw new Error("GitHub kände inte igen koden. Kopiera den en gång till och klistra in.");
+    const repo = (await u.json()).login + "/blippkort-data";
+    const r = await api("/repos/" + repo);
+    if (r.status === 404) {
+      const c = await api("/user/repos", { method: "POST", body: JSON.stringify({ name: "blippkort-data", private: true, auto_init: true, description: "Blippkort: register" }) });
+      if (!c.ok) throw new Error("Kunde inte skapa platsen för registret. Skapa koden via länken i steg 1 och försök igen.");
+    } else if (!r.ok) throw new Error("GitHub svarade " + r.status);
+    gh = { repo, token, who }; known = null; save("bk_gh", gh); show(view); sync();
+  } catch (e) { setCloud("", e instanceof TypeError ? "Inget nät just nu. Försök igen." : e.message); }
 }
+
+// ----- lägg till en enhet: en länk som kopplar den direkt, utan att någon behöver skriva in koder -----
+const b64url = (s) => b64e(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const unb64url = (s) => b64d(s.replace(/-/g, "+").replace(/_/g, "/"));
+async function sha256(s) {
+  const d = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)));
+  return [...d].map((x) => x.toString(16).padStart(2, "0")).join("");
+}
+async function makeLink(kind) {
+  const data = kind === "teacher" ? { r: gh.repo, t: gh.token, a: secret } : { r: gh.repo, t: gh.token, s: 1, h: await sha256(secret) };
+  return location.origin + location.pathname + "#k=" + b64url(JSON.stringify(data));
+}
+function vShare({ kind, link }) {
+  return `<div class="panel"><h3>➕ Lägg till en enhet</h3>
+    <div class="choices"><button class="${kind === "teacher" ? "on" : ""}" onclick="pickShare('teacher')">👩‍🏫 En lärare till (ser registret och kan ändra)</button>
+      <button class="${kind === "screen" ? "on" : ""}" onclick="pickShare('screen')">📺 En skärm (visar saldot när eleverna blippar)</button></div>
+    ${link ? `<p><b>Öppna den här länken på den andra enheten</b>, så kopplas den direkt.</p>
+      <p><textarea readonly rows="3" style="width:100%;font:13px monospace;border:2px solid var(--line);border-radius:14px;padding:10px;background:var(--card);color:var(--ink)" onclick="this.select()">${esc(link)}</textarea></p>
+      <div class="row"><button class="primary" onclick="sendLink()">${navigator.share ? "Dela länken" : "Kopiera länken"}</button></div>
+      <p class="muted" style="margin-bottom:0">${kind === "teacher" ? "Länken gör mottagaren till admin. Skicka den bara till kollegan."
+        : "Skärmen kan inte ändra kort. Den lämnar skärmläget med din adminnyckel."}</p>` : ""}</div>
+    <button onclick="show({name:'menu'})">Tillbaka</button>`;
+}
+async function pickShare(kind) { show({ name: "share", kind, link: await makeLink(kind) }); }
+async function sendLink() {
+  try {
+    if (navigator.share) await navigator.share({ title: "Blippkort", url: view.link });
+    else { await navigator.clipboard.writeText(view.link); toast("Länken är kopierad"); }
+  } catch { toast("Markera länken i rutan och kopiera den"); }
+}
+function useLink() {                      // körs när sidan öppnas via en sådan länk
+  if (!location.hash.startsWith("#k=")) return;
+  try {
+    const d = JSON.parse(unb64url(location.hash.slice(3)));
+    gh = { repo: d.r, token: d.t, who: d.a ? "" : "Skärm" }; saveQuiet("bk_gh", gh);
+    if (d.a) { secret = d.a; saveQuiet("bk_key", secret); role = null; try { localStorage.removeItem("bk_role"); } catch {} }
+    else { role = { screen: true, h: d.h }; saveQuiet("bk_role", role); }
+    setTimeout(() => toast(d.a ? "Enheten är kopplad som admin" : "Enheten är nu en skärm"), 300);
+  } catch { setTimeout(() => toast("Länken gick inte att läsa"), 300); }
+  history.replaceState(null, "", location.pathname);       // låt inte koden ligga kvar i adressfältet
+}
+
 function unlinkSync() {
   if (!confirm("Koppla från registret på den här enheten? Filen på GitHub ligger kvar.")) return;
   gh = null; known = null; try { localStorage.removeItem("bk_gh"); } catch {} setCloud("", ""); show(view);
@@ -835,23 +894,12 @@ function vRole() {
 }
 function vScreenSetup() {
   return `<div class="panel"><h3>📺 Gör enheten till skärm</h3>
-    <p class="muted">Skärmen behöver registret på GitHub. Den får aldrig adminnyckeln och kan inte själv ändra kort.</p>
-    <form onsubmit="event.preventDefault();saveScreen(this)">
-      <p>Privat förråd<br><input name="repo" value="Dorfeius/blippkort-data" required style="width:100%" autocapitalize="off"></p>
-      <p>Åtkomstnyckel från GitHub<br><input name="token" type="password" placeholder="github_pat_…" required style="width:100%" autocomplete="off"></p>
-      <p>Kod för att lämna skärmläget (minst 4 tecken)<br><input name="code" type="password" minlength="4" required style="width:100%" autocomplete="off"></p>
-      <button class="primary">Starta skärmläge</button></form></div>
-    <button onclick="show({name:'wait'})">Avbryt</button>`;
-}
-function saveScreen(f) {
-  const repo = f.repo.value.trim().replace(/^https:\/\/github\.com\//, "").replace(/\/$/, "");
-  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return toast("Skriv förrådet som konto/namn");
-  gh = { repo, token: f.token.value.trim(), who: "Skärm" }; known = null; save("bk_gh", gh);
-  role = { screen: true, code: f.code.value.trim() }; save("bk_role", role);
-  seenScan = null; scr = { mode: "idle" }; show({ name: "screen" }); sync();
+    <p>På lärarens mobil: <b>Meny → Register → Lägg till en enhet → En skärm</b>.</p>
+    <p>Öppna länken du får där på den här enheten, så blir den en skärm direkt.</p></div>
+    <button onclick="show({name:'wait'})">Tillbaka</button>`;
 }
 function startStation() {
-  if (!gh) return toast("Koppla först mobilen till registret (Meny → Register på GitHub)");
+  if (!gh) return toast("Koppla först registret (Meny → Register)");
   station = true; save("bk_station", true); show({ name: "station" });
   if (!kiosk) toggleKiosk();               // läsaren ska inte somna: helskärm och vaken skärm slås på direkt
 }
@@ -866,16 +914,16 @@ function startStation() {
   for (const ev of ["pointerup", "pointerleave", "pointercancel"]) btn.addEventListener(ev, stop);
   $("#shield").addEventListener("contextmenu", (e) => e.preventDefault());
 })();
-function unlock() {
+async function unlock() {
   if (station) {
     const k = prompt("Adminnyckeln för att lämna läsarläget:");
     if (k === null) return;
     if (k.trim() !== secret) return toast("Fel nyckel");
     station = false; save("bk_station", false); show({ name: "wait" });
   } else if (role) {
-    const c = prompt("Koden för att lämna skärmläget:");
+    const c = prompt("Adminnyckeln för att lämna skärmläget:");
     if (c === null) return;
-    if (c.trim() !== role.code) return toast("Fel kod");
+    if (role.h ? (await sha256(c.trim())) !== role.h : c.trim() !== role.code) return toast("Fel nyckel");
     role = null; gh = null; known = null; clearTimeout(scrTimer);
     try { localStorage.removeItem("bk_role"); localStorage.removeItem("bk_gh"); } catch {}
     setCloud("", ""); show({ name: "wait" });
@@ -990,6 +1038,7 @@ document.addEventListener("fullscreenchange", () => {   // lämnar man helskärm
 });
 document.addEventListener("visibilitychange", keepAwake);
 
+useLink();
 show({ name: station && secret ? "station" : role ? "screen" : "wait" });
 if (gh) { setCloud("", syncInfo); sync(); }
 </script>

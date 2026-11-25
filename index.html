@@ -132,6 +132,15 @@
   }
   .armed .what { white-space:normal; }
   .choices { display:grid; gap:12px; } .choices button { font-size:20px; padding:16px 18px; text-align:left; }
+  #shield { position:fixed; inset:0; z-index:50; touch-action:none; -webkit-user-select:none; user-select:none;
+            display:flex; align-items:flex-end; justify-content:center; padding:0 16px 28px; }
+  #shield[hidden] { display:none; }
+  #holdBtn { position:relative; overflow:hidden; width:100%; max-width:420px; padding:18px; touch-action:none;
+             background:rgba(20,18,38,.82); color:#fff; box-shadow:none; }
+  #holdBtn:active { transform:none; box-shadow:none; }
+  #holdBtn span { position:relative; }
+  #holdFill { position:absolute; inset:0; background:var(--accent); transform:scaleX(0); transform-origin:0 50%; }
+  #holdBtn.holding #holdFill { transform:scaleX(1); transition:transform 3s linear !important; }
   #fsBtn.on { background:var(--accent); color:#fff; box-shadow:0 4px 0 var(--accent-d); }
   @media (prefers-reduced-motion: reduce) { *:not(.count i) { animation:none !important; transition:none !important; } }
 </style>
@@ -148,6 +157,10 @@
 </header>
 <main id="app"></main>
 <div id="msg"></div>
+<!-- Pekspärr i läsarläge: mobilen ligger med skärmen nedåt, så inga tryck ska gå fram. Enda vägen ut är att hålla in knappen. -->
+<div id="shield" hidden>
+  <button id="holdBtn"><i id="holdFill"></i><span>🔒 Håll in i 3 sekunder för att låsa upp</span></button>
+</div>
 
 <script>
 "use strict";
@@ -406,7 +419,8 @@ function show(v) {
   view = v; clearTimeout(clearTimer);
   $("#adminBtn").textContent = secret ? "Meny" : "Admin";
   document.body.classList.toggle("wide", !!role);
-  $("#adminBtn").hidden = !!(station || role); $("#lockBtn").hidden = !(station || role);
+  $("#adminBtn").hidden = !!(station || role); $("#lockBtn").hidden = !role;
+  $("#shield").hidden = !(station && reader && v.name === "station");
   app.innerHTML = ({ role: vRole, screenSetup: vScreenSetup, screen: vScreen, station: vStation, wait: vWait, card: vCard, blank: vBlank, bad: vBad, edit: vEdit, fail: vFail, armed: vArmed,
                      menu: vMenu, list: vList, levels: vLevels, bonus: vBonus, sync: vSync, log: vLog }[v.name])(v);
   // ett avläst kort ligger inte kvar på skärmen till nästa person
@@ -839,7 +853,19 @@ function saveScreen(f) {
 function startStation() {
   if (!gh) return toast("Koppla först mobilen till registret (Meny → Register på GitHub)");
   station = true; save("bk_station", true); show({ name: "station" });
+  if (!kiosk) toggleKiosk();               // läsaren ska inte somna: helskärm och vaken skärm slås på direkt
 }
+// Lås upp läsarläget: bara genom att hålla in knappen i tre sekunder, och sedan ange adminnyckeln.
+(function () {
+  const btn = $("#holdBtn"); let timer = null;
+  const stop = () => { clearTimeout(timer); timer = null; btn.classList.remove("holding"); };
+  btn.addEventListener("pointerdown", (e) => {
+    e.preventDefault(); stop(); btn.classList.add("holding");
+    timer = setTimeout(() => { stop(); unlock(); }, 3000);
+  });
+  for (const ev of ["pointerup", "pointerleave", "pointercancel"]) btn.addEventListener(ev, stop);
+  $("#shield").addEventListener("contextmenu", (e) => e.preventDefault());
+})();
 function unlock() {
   if (station) {
     const k = prompt("Adminnyckeln för att lämna läsarläget:");
@@ -925,6 +951,7 @@ $("#nfcBtn").onclick = async () => {
     reader.onreading = (e) => onTap(e.serialNumber, e.message);
     reader.onreadingerror = () => toast("Kunde inte läsa kortet, försök igen");
     $("#nfcBtn").hidden = true; show(view);
+    if (station && !kiosk) toggleKiosk();
   } catch (e) { reader = null; toast("NFC kunde inte startas. Är NFC påslaget i mobilen?"); }
 };
 
@@ -958,6 +985,7 @@ async function toggleKiosk() {
   if (!full && !awake) { kiosk = false; paintKiosk(); }
 }
 document.addEventListener("fullscreenchange", () => {   // lämnar man helskärm (t.ex. med bakåt eller Esc) släpps också skärmen
+  if (station) return;                     // i läsarläge hålls skärmen vaken även om helskärmen råkar stängas
   if (!document.fullscreenElement && kiosk && document.fullscreenEnabled) toggleKiosk();
 });
 document.addEventListener("visibilitychange", keepAwake);
